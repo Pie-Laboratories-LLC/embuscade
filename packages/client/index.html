@@ -3,39 +3,145 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Lobo</title>
+    <title>Embuscade</title>
     <style>
-      body { background: #222; color: #eee; font-family: sans-serif; }
-      #level-label { margin: 8px 0; }
+      html, body {
+          height: 100%;
+          margin: 0;
+      }
+      body {
+          background: #222;
+          color: #eee;
+          font-family: sans-serif;
+          padding: 16px;
+          box-sizing: border-box;
+      }
+      #app {
+          height: calc(100vh - 32px); /* soustrait le padding du body (16px haut + 16px bas) */
+          display: flex;
+          flex-direction: column;
+      }
+      .screen-with-rail {
+          display: flex;
+          gap: 16px;
+          align-items: stretch;
+          flex: 1;
+          min-height: 0; /* nécessaire pour que les enfants flex avec overflow-y marchent correctement */
+      }
       canvas { background: #000; display: block; }
-
+      #mobile-block {
+          position: fixed;
+          inset: 0;
+          background: #222;
+          color: #eee;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          z-index: 9999;
+          padding: 24px;
+          box-sizing: border-box;
+      }
+      #mobile-block-box {
+          max-width: 420px;
+          text-align: center;
+      }
+      #mobile-block-box h2 { margin-top: 0; }
+      #mobile-block-box p { color: #ccc; line-height: 1.5; }
       #loading-status { padding: 16px; color: #aaa; }
 
       .screen-with-rail {
         display: flex;
         gap: 16px;
-        align-items: flex-start;
+        align-items: stretch;
+        height: 560px;
       }
 
-      #join-dialog, #builder-dialog, #lobby-dialog {
+      #join-dialog, #builder-dialog {
         max-width: 480px;
         padding: 16px;
         background: #333;
         border-radius: 8px;
       }
-      #browser-dialog {
-        padding: 16px;
+
+      .chat-main {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
         background: #333;
         border-radius: 8px;
-        max-width: 480px;
+        overflow: hidden;
       }
-      #right-rail, #game-right-rail {
-        width: 220px;
+      .chat-messages {
+        flex: 1;
+        overflow-y: auto;
+        padding: 12px;
+      }
+      .chat-message-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+      .chat-message-row .chat-sprite {
+        width: 24px;
+        height: 24px;
+        image-rendering: pixelated;
+        flex-shrink: 0;
+      }
+      .chat-message-row .chat-name {
+        font-weight: bold;
+        margin-right: 6px;
+      }
+      .chat-message-row .chat-text {
+        word-break: break-word;
+      }
+      .chat-input-row {
+        display: flex;
+        gap: 8px;
+        padding: 8px;
+        background: #2a2a2a;
+        border-top: 1px solid #444;
+      }
+      .chat-input-row input[type="text"] {
+        flex: 1;
+        padding: 6px;
+        box-sizing: border-box;
+      }
+      .chat-input-row button {
+        padding: 6px 14px;
+      }
+
+      .chat-messages-tight .chat-message-row {
+        margin-bottom: 2px;
+        line-height: 1.2;
+      }
+      .chat-messages-tight .chat-message-row .chat-sprite {
+        width: 16px;
+        height: 16px;
+      }
+      #game-chat-hint {
+        position: absolute;
+        left: 12px;
+        bottom: 8px;
+        font-size: 11px;
+        color: #666;
+      }
+      #game-chat-panel .chat-input-row {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: #2a2a2a;
+      }
+
+      #right-rail, #lobby-right-rail, #game-right-rail {
+        width: 240px;
         padding: 16px;
         background: #2a2a2a;
         border-radius: 8px;
+        overflow-y: auto;
       }
-      #right-rail h3, #game-right-rail h3 { margin-top: 0; font-size: 14px; color: #aaa; }
+      #right-rail h3, #lobby-right-rail h3, #game-right-rail h3 { margin-top: 0; font-size: 14px; color: #aaa; }
 
       #join-dialog label, #builder-dialog label {
         display: block;
@@ -68,14 +174,14 @@
       }
       #create-game-button:disabled { opacity: 0.4; cursor: not-allowed; }
 
-      .button-row { display: flex; gap: 8px; margin-top: 16px; }
+      .button-row { display: flex; gap: 8px; margin-top: 16px; margin-bottom: 12px; }
 
       .slider-row { display: flex; align-items: center; gap: 8px; }
       .slider-row input[type="range"] { flex: 1; }
       #maze-size-summary { margin-top: 10px; font-size: 13px; color: #aaa; }
       #maze-size-error { margin-top: 6px; font-size: 13px; color: #f66; display: none; }
 
-      #games-list { list-style: none; padding: 0; margin: 12px 0; }
+      #games-list { list-style: none; padding: 0; margin: 0; }
       #games-list li {
         display: flex;
         align-items: center;
@@ -89,14 +195,27 @@
       #games-list button { padding: 4px 12px; font-size: 14px; }
       #browser-empty-message { color: #888; font-size: 13px; }
 
-      #browser-players-list, #lobby-roster { list-style: none; padding: 0; margin: 0; }
-      #browser-players-list li, #lobby-roster li { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+      #lobby-roster { list-style: none; padding: 0; margin: 0 0 12px 0; }
+      #lobby-roster li { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
       .roster-sprite { width: 24px; height: 24px; image-rendering: pixelated; }
-
       #lobby-waiting-message { color: #aaa; font-size: 13px; }
 
-      #game-right-rail { min-height: 480px; }
-
+      #game-view-inner { display: flex; flex-direction: column; }
+      #scoreboard {
+          list-style: none;
+          padding: 0;
+          margin: 0 0 16px 0;
+      }
+      #scoreboard li {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          padding: 4px 0;
+      }
+      #scoreboard .score-value {
+          margin-left: auto;
+          font-weight: bold;
+      }
       #connection-status {
         position: fixed;
         left: 12px;
@@ -111,14 +230,89 @@
       #connection-dot { width: 10px; height: 10px; border-radius: 50%; background: #0f0; }
       #connection-dot.disconnected { background: #f00; animation: connection-blink 1s step-start infinite; }
       @keyframes connection-blink { 50% { opacity: 0.2; } }
+      #who-modal-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.6);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 2500;
+      }
+      #who-modal-box {
+        background: #2a2a2a;
+        border-radius: 8px;
+        width: 360px;
+        max-width: 90vw;
+        max-height: 90vh;
+        display: flex;
+        flex-direction: column;
+      }
+      #who-modal-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 12px 16px;
+        border-bottom: 1px solid #444;
+      }
+      #who-modal-header h3 { margin: 0; font-size: 16px; }
+      #who-modal-close {
+        background: none;
+        border: none;
+        color: #eee;
+        font-size: 18px;
+        padding: 0 4px;
+        cursor: pointer;
+      }
+      #who-modal-list {
+        list-style: none;
+        margin: 0;
+        padding: 12px 16px;
+        overflow-y: auto;
+        flex: 1;
+      }
+      #who-modal-list li { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+      #game-end-overlay {
+          position: fixed;
+          inset: 0;
+          background: rgba(0, 0, 0, 0.8);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          z-index: 2000;
+      }
+      #game-end-box {
+          background: #2a2a2a;
+          border-radius: 8px;
+          padding: 20px;
+          width: 420px;
+          max-width: 90vw;
+      }
+      #game-end-header {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          margin-bottom: 16px;
+      }
+      #game-end-sprite { image-rendering: pixelated; }
+      #game-end-title { margin: 0; }
+      #game-end-leave-button { margin-top: 12px; width: 100%; }
     </style>
   </head>
   <body>
+    <div id="mobile-block" style="display: none;">
+      <div id="mobile-block-box">
+        <h2>Embuscade needs a keyboard</h2>
+        <p>Embuscade is played with arrow keys, WASD, and other keyboard shortcuts -- it isn't playable on a phone or touch-only tablet.</p>
+        <p>Please come back on a desktop, laptop, or a tablet with a physical keyboard attached.</p>
+      </div>
+    </div>
+
     <div id="app">
       <div id="loading-status">Connecting...</div>
 
       <div id="join-dialog" style="display: none;">
-        <h2>Join Lobo</h2>
+        <h2>Join Embuscade</h2>
         <label for="player-name">Name</label>
         <input type="text" id="player-name" maxlength="20" />
 
@@ -135,8 +329,16 @@
       </div>
 
       <div id="browser-screen" class="screen-with-rail" style="display: none;">
-        <div id="browser-dialog">
-          <h2>Games</h2>
+        <div class="chat-main">
+          <div id="browser-chat-messages" class="chat-messages"></div>
+          <div class="chat-input-row">
+            <button id="browser-who-button">Who</button>
+            <input type="text" id="browser-chat-input" placeholder="Say something..." />
+            <button id="browser-chat-send-button">Chat</button>
+          </div>
+        </div>
+        <div id="right-rail">
+          <h3>Games</h3>
           <div class="button-row">
             <button id="browser-create-button">Create Game</button>
             <button id="browser-leave-button">Leave Game</button>
@@ -144,16 +346,12 @@
           <ul id="games-list"></ul>
           <div id="browser-empty-message">No open games -- create one!</div>
         </div>
-        <div id="right-rail">
-          <h3>Players Online</h3>
-          <ul id="browser-players-list"></ul>
-        </div>
       </div>
 
       <div id="builder-dialog" style="display: none;">
         <h2>Create Game</h2>
         <label for="game-name">Game name</label>
-        <input type="text" id="game-name" maxlength="120" placeholder="My Lobo Game" />
+        <input type="text" id="game-name" maxlength="120" placeholder="My Embuscade Game" />
 
         <label for="game-password">Password (optional)</label>
         <input type="text" id="game-password" placeholder="Leave blank for no password" />
@@ -176,29 +374,85 @@
         <div id="maze-size-summary"></div>
         <div id="maze-size-error"></div>
 
+        <label for="score-target">Play to: <span id="score-target-value">10</span> points</label>
+        <div class="slider-row"><input type="range" id="score-target" min="1" max="30" value="10" /></div>
+
+        <label>
+          <input type="checkbox" id="unlimited-time-checkbox" checked /> Unlimited time
+        </label>
+        <div id="time-limit-row" class="slider-row" style="display: none;">
+          <label for="time-limit">Time limit: <span id="time-limit-value">15</span> minutes</label>
+          <input type="range" id="time-limit" min="2" max="60" value="15" />
+        </div>
+
         <button id="create-game-button">Create Game</button>
       </div>
 
-      <div id="lobby-dialog" style="display: none;">
-        <h2 id="lobby-game-name"></h2>
-        <div id="lobby-size"></div>
-        <ul id="lobby-roster"></ul>
-        <div class="button-row">
-          <button id="start-game-button" style="display: none;">Start Game</button>
-          <button id="lobby-leave-button">Leave Game</button>
+      <div id="lobby-screen" class="screen-with-rail" style="display: none;">
+        <div class="chat-main">
+          <div id="lobby-chat-messages" class="chat-messages"></div>
+          <div class="chat-input-row">
+            <input type="text" id="lobby-chat-input" placeholder="Say something..." />
+            <button id="lobby-chat-send-button">Chat</button>
+          </div>
         </div>
-        <div id="lobby-waiting-message">Waiting for the host to start the game...</div>
+        <div id="lobby-right-rail">
+          <h3 id="lobby-game-name"></h3>
+          <div id="lobby-size"></div>
+          <ul id="lobby-roster"></ul>
+          <div class="button-row">
+            <button id="start-game-button" style="display: none;">Start Game</button>
+            <button id="lobby-leave-button">Leave Game</button>
+          </div>
+          <div id="lobby-waiting-message">Waiting for the host to start the game...</div>
+        </div>
       </div>
 
       <div id="game-view" class="screen-with-rail" style="display: none;">
-        <div>
-          <div id="level-label"></div>
+        <div id="game-view-inner">
           <canvas id="maze-canvas"></canvas>
+          <div class="chat-main" id="game-chat-panel" style="height: 120px; margin-top: 8px; position: relative;">
+            <div id="game-chat-messages" class="chat-messages chat-messages-tight"></div>
+            <div id="game-chat-hint">press '/' to chat</div>
+            <div class="chat-input-row" id="game-chat-input-row" style="display: none;">
+              <input type="text" id="game-chat-input" placeholder="Say something..." />
+              <button id="game-chat-send-button">Chat</button>
+            </div>
+          </div>
         </div>
         <div id="game-right-rail">
-          <h3>Lobo</h3>
+          <h3>Embuscade</h3>
+          <ol id="scoreboard"></ol>
           <button id="game-leave-button">Leave Game</button>
         </div>
+      </div>
+    </div>
+
+    <div id="who-modal-overlay" style="display: none;">
+      <div id="who-modal-box">
+        <div id="who-modal-header">
+          <h3>Players</h3>
+          <button id="who-modal-close">✕</button>
+        </div>
+        <ul id="who-modal-list"></ul>
+      </div>
+    </div>
+
+    <div id="game-end-overlay" style="display: none;">
+      <div id="game-end-box">
+        <div id="game-end-header">
+          <canvas id="game-end-sprite" width="32" height="32"></canvas>
+          <h2 id="game-end-title"></h2>
+        </div>
+        <div class="chat-main" style="height: 300px;">
+          <div id="end-chat-messages" class="chat-messages"></div>
+          <div class="chat-input-row">
+            <button id="end-who-button">Who</button>
+            <input type="text" id="end-chat-input" placeholder="Say something..." />
+            <button id="end-chat-send-button">Chat</button>
+          </div>
+        </div>
+        <button id="game-end-leave-button">Leave</button>
       </div>
     </div>
 

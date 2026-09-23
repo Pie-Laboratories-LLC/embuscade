@@ -2,6 +2,8 @@ import { WebSocketServer } from 'ws';
 import Wilson from '@bolo/shared/Wilson.js';
 import { Direction } from '@bolo/shared/Direction.js';
 import { getVerticalIcons } from '@bolo/shared/MazeGeometry.js';
+import { createHash } from 'node:crypto';
+import { assignAIIdentities, updateAITank } from './ai.js';
 
 const TANK_RADIUS = 14;
 const MAX_SPEED = 120;
@@ -15,12 +17,17 @@ const ICON_HIT_RADIUS = 20;
 const VERTICAL_TRANSITION_MS = 750;
 const VERTICAL_COOLDOWN_MS = 1500;
 const SHOT_SIZE = 4;
+const CELL_SIZE = 256;
 const SHOT_SPEED = MAX_SPEED * 2;
 const FIRE_COOLDOWN_MS = 500;
 const AFK_TIMEOUT_MS = 15000;
 const RAM_DAMAGE_SCALE = 100 / (2 * MAX_SPEED);
 const MAX_TOTAL_PLAYERS = 16;
 const RECONNECT_GRACE_MS = 60000;
+const CHAT_MAX_BYTES = 256;
+const CHAT_RATE_LIMIT_MS = 1000;
+const RESPAWN_DELAY_MS = 3500;
+const DEFAULT_SCORE_TARGET = 10;
 
 const FIRE_KEY_OFFSETS = {
     fireForward: 0,
@@ -32,8 +39,16 @@ const FIRE_KEY_OFFSETS = {
 const games = new Map();
 const browserSockets = new Set();
 const browserIdentities = new Map(); // ws -> {name, primaryColor, secondaryColor, sprite}
+const browserLastChatTime = new Map(); // ws -> timestamp
 const sessionTokens = new Map();
 let nextGameId = 1;
+
+function formatGamePreview(game) {
+    const timePart = game.timeLimitMs
+        ? `${Math.round(game.timeLimitMs / 60000)} minutes`
+        : 'unlimited time';
+    return `Play to: ${game.scoreTarget}, ${timePart}`;
+}
 
 function gameSummary(game) {
     return {
@@ -45,7 +60,8 @@ function gameSummary(game) {
         humanSlots: game.humanSlots,
         aiSlots: game.aiSlots,
         playerCount: game.tanks.size,
-        hasPassword: !!game.password
+        hasPassword: !!game.password,
+        preview: formatGamePreview(game)
     };
 }
 
@@ -81,9 +97,13 @@ function buildRoster(game) {
     }));
 }
 
+function hashPassword(password) {
+    return createHash('sha256').update(password).digest('hex');
+}
+
 function createGame(config) {
     const gameId = nextGameId++;
-    const cellSize = 256;
+    const cellSize = CELL_SIZE;
 
     const wilson = new Wilson(config.width, config.length, config.height);
 
@@ -104,7 +124,13 @@ function createGame(config) {
         aiSlots: config.aiCount,
         nextLocalPlayerId: 1,
         nextLocalShotId: 1,
-        shotMaxDistance: cellSize * 2
+        shotMaxDistance: cellSize * 2,
+        password: config.password ? hashPassword(config.password) : null,
+        scoreTarget: config.scoreTarget,
+        timeLimitMs: config.timeLimitMs,
+        startedAt: null,
+        ended: false,
+        powerUps: []
     };
 
     games.set(gameId, game);
@@ -241,6 +267,8 @@ function resolveTankCollisions(game) {
             const a = tankList[i];
             const b = tankList[j];
 
+            if (a.dead || b.dead) continue;
+
             const aZs = activeZSet(a);
             const bZs = activeZSet(b);
             const shareLevel = aZs.some(z => bZs.includes(z));
@@ -267,9 +295,14 @@ function resolveTankCollisions(game) {
             const closingSpeed = Math.max(0, relVx * normalX + relVy * normalY);
             const damage = closingSpeed * RAM_DAMAGE_SCALE;
 
-            if (!isAfk(a,game.started)) a.health = Math.max(0, a.health - damage);
-            if (!isAfk(b,game.started)) b.health = Math.max(0, b.health - damage);
-
+            if (!isAfk(a,game.started)) {
+                a.health = Math.max(0, a.health - damage);
+                if (a.health === 0) a.killedByCandidate = b.playerId;
+            }
+            if (!isAfk(b,game.started)) {
+                b.health = Math.max(0, b.health - damage);
+                if (b.health === 0) b.killedByCandidate = a.playerId;
+            }
             a.x = a.prevX;
             a.y = a.prevY;
             a.speed = 0;
@@ -324,6 +357,7 @@ function resolveShotHits(game) {
     for (const shot of game.shots.values()) {
         for (const tank of game.tanks.values()) {
             if (tank.playerId === shot.ownerId) continue;
+            if (tank.dead) continue;
             if (tank.z !== shot.z) continue;
 
             const dx = tank.x - shot.x;
@@ -334,6 +368,7 @@ function resolveShotHits(game) {
             if (distSq < hitRadius * hitRadius) {
                 if (!isAfk(tank,game.started)) {
                     tank.health = Math.max(0, tank.health - 25);
+                    if (tank.health === 0) tank.killedBy = shot.ownerId;
                 }
                 game.shots.delete(shot.shotId);
                 break;
@@ -359,30 +394,33 @@ function broadcastGameState(game) {
 
         const message = JSON.stringify({
             type: 'state',
-            tanks: tankList.map(t => ({
-                playerId: t.playerId,
-                x: t.x,
-                y: t.y,
-                z: t.z,
-                health: t.health,
-                heading: t.heading,
-                speed: t.speed,
-                afk: isAfk(t,game.started),
-                transitioning: t.transitioning,
-                transitionFromZ: t.transitionFromZ,
-                transitionToZ: t.transitionToZ,
-                transitionProgress: t.transitioning
-                    ? Math.min(1, (now - t.transitionStartTime) / VERTICAL_TRANSITION_MS)
-                    : null,
-                verticalCooldown: (t.playerId === recipient.playerId && t.verticalCooldown && now < t.verticalCooldown.until)
-                    ? {
-                        direction: t.verticalCooldown.direction,
-                        cellX: t.verticalCooldown.cellX,
-                        cellY: t.verticalCooldown.cellY,
-                        remainingMs: t.verticalCooldown.until - now
-                      }
-                    : null
-            })),
+            tanks: tankList
+                .map(t => ({
+                    playerId: t.playerId,
+                    x: t.x,
+                    y: t.y,
+                    z: t.z,
+                    health: t.health,
+                    heading: t.heading,
+                    speed: t.speed,
+                    dead: t.dead,
+                    score: t.score,
+                    afk: isAfk(t, game.started),
+                    transitioning: t.transitioning,
+                    transitionFromZ: t.transitionFromZ,
+                    transitionToZ: t.transitionToZ,
+                    transitionProgress: t.transitioning
+                        ? Math.min(1, (now - t.transitionStartTime) / VERTICAL_TRANSITION_MS)
+                        : null,
+                    verticalCooldown: (t.playerId === recipient.playerId && t.verticalCooldown && now < t.verticalCooldown.until)
+                        ? {
+                            direction: t.verticalCooldown.direction,
+                            cellX: t.verticalCooldown.cellX,
+                            cellY: t.verticalCooldown.cellY,
+                            remainingMs: t.verticalCooldown.until - now
+                          }
+                        : null
+                })),
             shots: shotsPayload
         });
 
@@ -401,7 +439,9 @@ function broadcastLobbyState(game) {
         humanSlots: game.humanSlots,
         aiSlots: game.aiSlots,
         started: game.started,
-        roster: buildRoster(game)
+        hasPassword: !!game.password,
+        roster: buildRoster(game),
+        preview: formatGamePreview(game),
     });
 
     for (const tank of game.tanks.values()) {
@@ -412,12 +452,43 @@ function broadcastLobbyState(game) {
 
 function startGame(game) {
     game.started = true;
+    game.startedAt = Date.now();
 
-    let i = 0;
-    for (const tank of game.tanks.values()) {
-        tank.x = game.cellSize * 0.5 + (i * TANK_RADIUS * 3);
-        tank.y = game.cellSize * 0.5;
-        tank.z = 0;
+    const aiIdentities = assignAIIdentities(game.aiSlots);
+    for (const identity of aiIdentities) {
+        const playerId = game.nextLocalPlayerId++;
+        const tank = {
+            playerId,
+            ws: null,
+            isAI: true,
+            sessionToken: null,
+            name: identity.name,
+            primaryColor: identity.primaryColor,
+            secondaryColor: identity.secondaryColor,
+            sprite: identity.sprite,
+            x: 0, y: 0, z: 0, heading: 0, speed: 0, health: 100,
+            score: 0, lastScoreTime: null,
+            dead: false, deathTime: null,
+            transitioning: false, transitionFromZ: null, transitionToZ: null,
+            transitionStartTime: null, verticalCooldown: null,
+            lastActivityTime: Date.now(), tabHidden: false, disconnected: false,
+            disconnectTimeout: null, hostGraceTimeout: null, wasHostAtDisconnect: false,
+            lastFireTime: null,
+            aiState: 'wander', aiWaypoints: [],
+            input: { turnLeft: false, turnRight: false, throttleUp: false, throttleDown: false }
+        };
+        game.tanks.set(playerId, tank);
+    }
+
+    const playerIds = Array.from(game.tanks.keys());
+    const positions = placeStartingPositions(game, playerIds.length);
+
+    playerIds.forEach((playerId, i) => {
+        const tank = game.tanks.get(playerId);
+        const [z, cellY, cellX] = positions[i] ?? [0, 0, 0];
+        tank.x = cellX * game.cellSize + game.cellSize / 2;
+        tank.y = cellY * game.cellSize + game.cellSize / 2;
+        tank.z = z;
         tank.heading = 0;
         tank.speed = 0;
         tank.health = 100;
@@ -430,8 +501,7 @@ function startGame(game) {
         tank.tabHidden = false;
         tank.lastFireTime = null;
         tank.input = { turnLeft: false, turnRight: false, throttleUp: false, throttleDown: false };
-        i++;
-    }
+    });
 
     for (const tank of game.tanks.values()) {
         if (!tank.ws || tank.ws.readyState !== tank.ws.OPEN) continue;
@@ -455,13 +525,18 @@ function purgeTank(game, playerId) {
     if (tank.hostGraceTimeout) clearTimeout(tank.hostGraceTimeout);
     game.tanks.delete(playerId);
 
-    console.log('purgeTank:', playerId, 'remaining tanks:', game.tanks.size);
+    const remainingHumans = Array.from(game.tanks.values()).filter(t => !t.isAI);
 
-    if (game.tanks.size === 0) {
+    if (remainingHumans.length === 0) {
+        for (const t of game.tanks.values()) {
+            if (t.disconnectTimeout) clearTimeout(t.disconnectTimeout);
+            if (t.hostGraceTimeout) clearTimeout(t.hostGraceTimeout);
+        }
         games.delete(game.id);
     } else {
         if (playerId === game.hostPlayerId) {
-            game.hostPlayerId = game.tanks.keys().next().value;
+            const nextHost = remainingHumans[0];
+            game.hostPlayerId = nextHost.playerId;
         }
         if (!game.started) broadcastLobbyState(game);
     }
@@ -472,11 +547,235 @@ function promoteNextHost(game, departingHostId) {
     if (game.hostPlayerId !== departingHostId) return;
     if (!game.tanks.has(departingHostId)) return;
 
-    const nextHost = Array.from(game.tanks.keys()).find(id => id !== departingHostId);
+    const nextHost = Array.from(game.tanks.values()).find(t => t.playerId !== departingHostId && !t.isAI);
     if (!nextHost) return;
 
-    game.hostPlayerId = nextHost;
+    game.hostPlayerId = nextHost.playerId;
     broadcastLobbyState(game);
+}
+
+function cellKey(z, y, x) {
+    return `${z},${y},${x}`;
+}
+
+function getNeighbors(game, z, y, x) {
+    const cell = game.maze[z][y][x];
+    const neighbors = [];
+
+    if (cell & Direction.North) neighbors.push([z, y - 1, x]);
+    if (cell & Direction.South) neighbors.push([z, y + 1, x]);
+    if (cell & Direction.East) neighbors.push([z, y, x + 1]);
+    if (cell & Direction.West) neighbors.push([z, y, x - 1]);
+    if (cell & Direction.Up) neighbors.push([z - 1, y, x]);
+    if (cell & Direction.Down) neighbors.push([z + 1, y, x]);
+
+    return neighbors;
+}
+
+// BFS multi-source: retourne, pour chaque cellule atteignable, la distance
+// (en sauts) jusqu'à la cellule occupée la plus proche. Les transitions
+// verticales comptent comme un saut, au même titre qu'un déplacement
+// horizontal.
+export function computeDistances(game, occupiedCells) {
+    const distances = new Map();
+    const queue = [];
+
+    for (const [z, y, x] of occupiedCells) {
+        const key = cellKey(z, y, x);
+        if (distances.has(key)) continue;
+        distances.set(key, 0);
+        queue.push([z, y, x, 0]);
+    }
+
+    let head = 0;
+    while (head < queue.length) {
+        const [z, y, x, dist] = queue[head++];
+        for (const [nz, ny, nx] of getNeighbors(game, z, y, x)) {
+            const key = cellKey(nz, ny, nx);
+            if (distances.has(key)) continue;
+            distances.set(key, dist + 1);
+            queue.push([nz, ny, nx, dist + 1]);
+        }
+    }
+
+    return distances;
+}
+
+// Trouve la cellule non-occupée la plus éloignée de l'ensemble occupé
+// (distance de graphe). Retourne null si toutes les cellules sont occupées
+// (carte pleine).
+function findFarthestCell(game, occupiedCells) {
+    const distances = computeDistances(game, occupiedCells);
+    const occupiedKeys = new Set(occupiedCells.map(([z, y, x]) => cellKey(z, y, x)));
+
+    let best = null;
+    let bestDist = -1;
+
+    for (let z = 0; z < game.height; z++) {
+        for (let y = 0; y < game.length; y++) {
+            for (let x = 0; x < game.width; x++) {
+                const key = cellKey(z, y, x);
+                if (occupiedKeys.has(key)) continue;
+                const dist = distances.get(key) ?? -1; // -1 si inatteignable (ne devrait
+                                                          // jamais arriver, Wilson garantit
+                                                          // la connexité totale)
+                if (dist > bestDist) {
+                    bestDist = dist;
+                    best = [z, y, x];
+                }
+            }
+        }
+    }
+
+    return best;
+}
+
+function getPowerUpOccupiedCells(game) {
+    return game.powerUps.map(p => [p.z, p.cellY, p.cellX]);
+}
+
+// Place N positions de départ aussi équidistantes que possible les unes des
+// autres ET des power-ups déjà sur la carte, en piochant itérativement la
+// cellule la plus éloignée de tout ce qui est déjà occupé.
+function placeStartingPositions(game, playerCount) {
+    const occupied = getPowerUpOccupiedCells(game);
+    const positions = [];
+
+    if (playerCount === 0) return positions;
+
+    // Premier joueur: rien n'est encore occupé, donc "le plus éloigné" n'a
+    // pas de sens -- place-le à une position fixe et arbitraire (centre du
+    // rez-de-chaussée) plutôt que de dépendre de findFarthestCell, qui a
+    // besoin d'au moins une cellule occupée pour fonctionner.
+    const firstCell = [0, Math.floor(game.length / 2), Math.floor(game.width / 2)];
+    positions.push(firstCell);
+    occupied.push(firstCell);
+
+    for (let i = 1; i < playerCount; i++) {
+        const cell = findFarthestCell(game, occupied);
+        if (!cell) break;
+        positions.push(cell);
+        occupied.push(cell);
+    }
+
+    return positions;
+}
+
+// Choisit une position de réapparition pour un char donné, loin de tous les
+// autres chars vivants et des power-ups.
+function pickRespawnCell(game, excludePlayerId) {
+    const occupied = getPowerUpOccupiedCells(game);
+    for (const tank of game.tanks.values()) {
+        if (tank.playerId === excludePlayerId) continue;
+        occupied.push([tank.z, Math.floor(tank.y / game.cellSize), Math.floor(tank.x / game.cellSize)]);
+    }
+
+    return findFarthestCell(game, occupied);
+}
+
+function checkDeaths(game) {
+    const newlyDead = [];
+
+    for (const tank of game.tanks.values()) {
+        if (tank.dead) continue;
+        if (tank.health > 0) continue;
+
+        tank.dead = true;
+        tank.deathTime = Date.now();
+        tank.speed = 0;
+        newlyDead.push(tank);
+    }
+
+    for (const tank of newlyDead) {
+        const killerId = tank.killedBy ?? tank.killedByCandidate ?? null;
+        tank.killedBy = null;
+        tank.killedByCandidate = null;
+
+        if (killerId === null) continue;
+
+        const killer = game.tanks.get(killerId);
+        if (killer && !killer.dead && killer.playerId !== tank.playerId) {
+            killer.score += 1;
+            killer.lastScoreTime = Date.now();
+        }
+    }
+}
+
+function respawnDeadTanks(game) {
+    const now = Date.now();
+    for (const tank of game.tanks.values()) {
+        if (!tank.dead) continue;
+        if (now - tank.deathTime < RESPAWN_DELAY_MS) continue;
+
+        const cell = pickRespawnCell(game, tank.playerId);
+        const [z, cellY, cellX] = cell ?? [tank.z, Math.floor(tank.y / game.cellSize), Math.floor(tank.x / game.cellSize)];
+
+        tank.x = cellX * game.cellSize + game.cellSize / 2;
+        tank.y = cellY * game.cellSize + game.cellSize / 2;
+        tank.z = z;
+        tank.heading = 0;
+        tank.speed = 0;
+        tank.health = 100;
+        tank.dead = false;
+        tank.deathTime = null;
+        tank.transitioning = false;
+        tank.transitionFromZ = null;
+        tank.transitionToZ = null;
+        tank.transitionStartTime = null;
+        tank.verticalCooldown = null;
+        tank.lastActivityTime = now;
+        if (tank.isAI) {
+            tank.aiState = 'wander';
+            tank.aiWaypoints = [];
+        }
+    }
+}
+
+function checkGameEnd(game) {
+    if (game.ended) return;
+
+    const now = Date.now();
+    const timeExpired = game.timeLimitMs && (now - game.startedAt >= game.timeLimitMs);
+    const someoneWon = Array.from(game.tanks.values()).some(t => t.score >= game.scoreTarget);
+
+    if (!timeExpired && !someoneWon) return;
+
+    const tankList = Array.from(game.tanks.values());
+    let winner = tankList[0];
+    for (const tank of tankList) {
+        if (tank.score > winner.score) {
+            winner = tank;
+        } else if (tank.score === winner.score) {
+            const tankTime = tank.lastScoreTime ?? Infinity;
+            const winnerTime = winner.lastScoreTime ?? Infinity;
+            if (tankTime < winnerTime) winner = tank; // le premier à avoir atteint ce score l'emporte
+        }
+    }
+
+    game.ended = true;
+
+    const message = JSON.stringify({
+        type: 'game-ended',
+        winner: {
+            playerId: winner.playerId,
+            name: winner.name,
+            primaryColor: winner.primaryColor,
+            secondaryColor: winner.secondaryColor,
+            sprite: winner.sprite
+        },
+        scores: tankList.map(t => ({
+            playerId: t.playerId,
+            name: t.name,
+            primaryColor: t.primaryColor,
+            secondaryColor: t.secondaryColor,
+            sprite: t.sprite,
+            score: t.score
+        }))
+    });
+
+    for (const tank of game.tanks.values()) {
+        if (tank.ws && tank.ws.readyState === tank.ws.OPEN) tank.ws.send(message);
+    }
 }
 
 let lastTick = Date.now();
@@ -486,16 +785,57 @@ function tick() {
     lastTick = now;
 
     for (const game of games.values()) {
-        if (!game.started) continue;
+        if (!game.started || game.ended) continue;
 
         for (const tank of game.tanks.values()) {
+            if (tank.dead) continue;
+            if (tank.isAI) updateAITank(game, tank, dt, trySpawnShot, computeDistances);
             updateTank(game, tank, dt);
         }
 
         resolveTankCollisions(game);
         updateShots(game, dt);
         resolveShotHits(game);
+        checkDeaths(game);
+        respawnDeadTanks(game);
+        checkGameEnd(game);
         broadcastGameState(game);
+    }
+}
+
+function byteLength(str) {
+    return new TextEncoder().encode(str).length;
+}
+
+function broadcastBrowseChat(identity, text) {
+    const message = JSON.stringify({
+        type: 'chat-message',
+        name: identity.name,
+        primaryColor: identity.primaryColor,
+        secondaryColor: identity.secondaryColor,
+        sprite: identity.sprite,
+        text,
+        timestamp: Date.now()
+    });
+
+    for (const socket of browserSockets) {
+        if (socket.readyState === socket.OPEN) socket.send(message);
+    }
+}
+
+function broadcastGameChat(game, tank, text) {
+    const message = JSON.stringify({
+        type: 'chat-message',
+        name: tank.name,
+        primaryColor: tank.primaryColor,
+        secondaryColor: tank.secondaryColor,
+        sprite: tank.sprite,
+        text,
+        timestamp: Date.now()
+    });
+
+    for (const t of game.tanks.values()) {
+        if (t.ws && t.ws.readyState === t.ws.OPEN) t.ws.send(message);
     }
 }
 
@@ -600,12 +940,15 @@ wss.on('connection', (ws) => {
             const height = Math.max(1, Math.min(10, parseInt(msg.height, 10) || 1));
             const humanCount = Math.max(1, Math.min(MAX_TOTAL_PLAYERS, parseInt(msg.humanCount, 10) || 1));
             const aiCount = Math.max(0, Math.min(MAX_TOTAL_PLAYERS - humanCount, parseInt(msg.aiCount, 10) || 0));
+            const scoreTarget = Math.max(1, Math.min(100, parseInt(msg.scoreTarget, 10) || DEFAULT_SCORE_TARGET));
+            const timeLimitMs = msg.timeLimitMs ? Math.max(2, Math.min(60, parseInt(msg.timeLimitMs, 10))) * 60000 : null;
 
             const game = createGame({
                 name: String(msg.name ?? 'Untitled Game').slice(0, 120),
-                password: msg.password ? String(msg.password) : null,
+                password: msg.password ? hashPassword(msg.password) : null,
                 width, length, height,
-                humanCount, aiCount
+                humanCount, aiCount,
+                scoreTarget, timeLimitMs
             });
 
             currentGame = game;
@@ -621,12 +964,16 @@ wss.on('connection', (ws) => {
                 primaryColor: msg.primaryColor,
                 secondaryColor: msg.secondaryColor,
                 sprite: msg.sprite,
+                dead: false,
+                deathTime: null,
                 x: 0, y: 0, z: 0, heading: 0, speed: 0, health: 100,
                 transitioning: false, transitionFromZ: null, transitionToZ: null,
                 transitionStartTime: null, verticalCooldown: null,
                 lastActivityTime: Date.now(), tabHidden: false, disconnected: false,
                 disconnectTimeout: null, hostGraceTimeout: null, wasHostAtDisconnect: false,
                 lastFireTime: null,
+                score: 0,
+                lastScoreTime: null,
                 input: { turnLeft: false, turnRight: false, throttleUp: false, throttleDown: false }
             };
 
@@ -647,7 +994,7 @@ wss.on('connection', (ws) => {
 
             const game = games.get(msg.gameId);
             if (!game || game.started) return;
-            if (game.password && game.password !== msg.password) {
+            if (game.password && game.password !== hashPassword(msg.password || '')) {
                 ws.send(JSON.stringify({ type: 'join-rejected', reason: 'bad-password' }));
                 return;
             }
@@ -668,12 +1015,16 @@ wss.on('connection', (ws) => {
                 primaryColor: msg.primaryColor,
                 secondaryColor: msg.secondaryColor,
                 sprite: msg.sprite,
+                dead: false,
+                deathTime: null,
                 x: 0, y: 0, z: 0, heading: 0, speed: 0, health: 100,
                 transitioning: false, transitionFromZ: null, transitionToZ: null,
                 transitionStartTime: null, verticalCooldown: null,
                 lastActivityTime: Date.now(), tabHidden: false, disconnected: false,
                 disconnectTimeout: null, hostGraceTimeout: null, wasHostAtDisconnect: false,
                 lastFireTime: null,
+                score: 0,
+                lastScoreTime: null,
                 input: { turnLeft: false, turnRight: false, throttleUp: false, throttleDown: false }
             };
 
@@ -717,6 +1068,30 @@ wss.on('connection', (ws) => {
             return;
         }
 
+        if (msg.type === 'chat') {
+            const text = typeof msg.text === 'string' ? msg.text.trim() : '';
+            if (text.length === 0) return;
+            if (byteLength(text) > CHAT_MAX_BYTES) return;
+
+            const now = Date.now();
+
+            if (currentGame && assignedPlayerId !== null) {
+                const tank = currentGame.tanks.get(assignedPlayerId);
+                if (!tank) return;
+                if (tank.lastChatTime && now - tank.lastChatTime < CHAT_RATE_LIMIT_MS) return;
+                tank.lastChatTime = now;
+                broadcastGameChat(currentGame, tank, text);
+            } else {
+                const last = browserLastChatTime.get(ws) || 0;
+                if (now - last < CHAT_RATE_LIMIT_MS) return;
+                browserLastChatTime.set(ws, now);
+                const identity = browserIdentities.get(ws);
+                if (!identity) return;
+                broadcastBrowseChat(identity, text);
+            }
+            return;
+        }
+
         if (!currentGame || assignedPlayerId === null) return;
         const tank = currentGame.tanks.get(assignedPlayerId);
         if (!tank) return;
@@ -739,6 +1114,7 @@ wss.on('connection', (ws) => {
     ws.on('close', () => {
         browserSockets.delete(ws);
         browserIdentities.delete(ws);
+        browserLastChatTime.delete(ws);
 
         if (!currentGame || assignedPlayerId === null) return;
         const game = currentGame;
