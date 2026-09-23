@@ -50,3 +50,6 @@ jimmy*.png
 
 # node
 node_modules
+
+# vite build output
+dist

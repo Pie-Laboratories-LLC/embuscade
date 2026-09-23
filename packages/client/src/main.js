@@ -2,6 +2,7 @@ import { Direction } from '@bolo/shared/Direction.js';
 import { getVerticalIcons } from '@bolo/shared/MazeGeometry.js';
 import { PRESET_SPRITES, TRANSPARENT } from '@bolo/shared/PresetSprites.js';
 import { DEFAULT_THEME } from '@bolo/shared/Theme.js';
+import './embuscade.css';
 
 const TANK_RADIUS = 14;
 const SPRITE_SIZE = 32;
@@ -14,18 +15,172 @@ const PROFILE_STORAGE_KEY = 'bolo:playerProfile';
 const SESSION_TOKEN_KEY = 'bolo:sessionToken';
 const CELLS_PER_PLAYER = 6.25;
 
-let playerId = null;
-let maze = null;
-let mazeConfig = null;
-let tanks = [];
-let shots = [];
-let ws = null;
-let isHost = false;
-let playerProfile = null;
-let pingIntervalId = null;
-let chatMessages = [];
+// Everything mount() renders into its container. Ids are emb- prefixed so
+// they can't collide with a host page's own (see embuscade.css's header).
+const MARKUP = `
+    <div id="emb-mobile-block" style="display: none;">
+      <div id="emb-mobile-block-box">
+        <h2>Embuscade needs a keyboard</h2>
+        <p>Embuscade is played with arrow keys, WASD, and other keyboard shortcuts -- it isn't playable on a phone or touch-only tablet.</p>
+        <p>Please come back on a desktop, laptop, or a tablet with a physical keyboard attached.</p>
+      </div>
+    </div>
 
-const identities = new Map();
+    <div class="embuscade-screens">
+      <div id="emb-loading-status">Connecting...</div>
+
+      <div id="emb-join-dialog" style="display: none;">
+        <h2>Join Embuscade</h2>
+        <label for="emb-player-name">Name</label>
+        <input type="text" id="emb-player-name" maxlength="20" />
+
+        <label for="emb-primary-color">Primary colour</label>
+        <input type="color" id="emb-primary-color" />
+
+        <label for="emb-secondary-color">Secondary colour</label>
+        <input type="color" id="emb-secondary-color" />
+
+        <label>Tank style</label>
+        <div id="emb-preset-list"></div>
+
+        <button id="emb-join-button">Next</button>
+      </div>
+
+      <div id="emb-browser-screen" class="screen-with-rail" style="display: none;">
+        <div class="chat-main">
+          <div id="emb-browser-chat-messages" class="chat-messages"></div>
+          <div class="chat-input-row">
+            <button id="emb-browser-who-button">Who</button>
+            <input type="text" id="emb-browser-chat-input" placeholder="Say something..." />
+            <button id="emb-browser-chat-send-button">Chat</button>
+          </div>
+        </div>
+        <div id="emb-right-rail">
+          <h3>Games</h3>
+          <div class="button-row">
+            <button id="emb-browser-create-button">Create Game</button>
+            <button id="emb-browser-leave-button">Leave Game</button>
+          </div>
+          <ul id="emb-games-list"></ul>
+          <div id="emb-browser-empty-message">No open games -- create one!</div>
+        </div>
+      </div>
+
+      <div id="emb-builder-dialog" style="display: none;">
+        <h2>Create Game</h2>
+        <label for="emb-game-name">Game name</label>
+        <input type="text" id="emb-game-name" maxlength="120" placeholder="My Embuscade Game" />
+
+        <label for="emb-game-password">Password (optional)</label>
+        <input type="text" id="emb-game-password" placeholder="Leave blank for no password" />
+
+        <label for="emb-human-count">Human players: <span id="emb-human-count-value">2</span></label>
+        <div class="slider-row"><input type="range" id="emb-human-count" min="1" max="16" value="2" /></div>
+
+        <label for="emb-ai-count">AI players: <span id="emb-ai-count-value">0</span></label>
+        <div class="slider-row"><input type="range" id="emb-ai-count" min="0" max="15" value="0" /></div>
+
+        <label for="emb-maze-width">Width: <span id="emb-maze-width-value">10</span></label>
+        <div class="slider-row"><input type="range" id="emb-maze-width" min="2" max="10" value="10" /></div>
+
+        <label for="emb-maze-length">Length: <span id="emb-maze-length-value">10</span></label>
+        <div class="slider-row"><input type="range" id="emb-maze-length" min="2" max="10" value="10" /></div>
+
+        <label for="emb-maze-height">Height: <span id="emb-maze-height-value">1</span></label>
+        <div class="slider-row"><input type="range" id="emb-maze-height" min="1" max="10" value="1" /></div>
+
+        <div id="emb-maze-size-summary"></div>
+        <div id="emb-maze-size-error"></div>
+
+        <label for="emb-score-target">Play to: <span id="emb-score-target-value">10</span> points</label>
+        <div class="slider-row"><input type="range" id="emb-score-target" min="1" max="30" value="10" /></div>
+
+        <label>
+          <input type="checkbox" id="emb-unlimited-time-checkbox" checked /> Unlimited time
+        </label>
+        <div id="emb-time-limit-row" class="slider-row" style="display: none;">
+          <label for="emb-time-limit">Time limit: <span id="emb-time-limit-value">15</span> minutes</label>
+          <input type="range" id="emb-time-limit" min="2" max="60" value="15" />
+        </div>
+
+        <button id="emb-create-game-button">Create Game</button>
+      </div>
+
+      <div id="emb-lobby-screen" class="screen-with-rail" style="display: none;">
+        <div class="chat-main">
+          <div id="emb-lobby-chat-messages" class="chat-messages"></div>
+          <div class="chat-input-row">
+            <input type="text" id="emb-lobby-chat-input" placeholder="Say something..." />
+            <button id="emb-lobby-chat-send-button">Chat</button>
+          </div>
+        </div>
+        <div id="emb-lobby-right-rail">
+          <h3 id="emb-lobby-game-name"></h3>
+          <div id="emb-lobby-size"></div>
+          <ul id="emb-lobby-roster"></ul>
+          <div class="button-row">
+            <button id="emb-start-game-button" style="display: none;">Start Game</button>
+            <button id="emb-lobby-leave-button">Leave Game</button>
+          </div>
+          <div id="emb-lobby-waiting-message">Waiting for the host to start the game...</div>
+        </div>
+      </div>
+
+      <div id="emb-game-view" class="screen-with-rail" style="display: none;">
+        <div id="emb-game-view-inner">
+          <canvas id="emb-maze-canvas"></canvas>
+          <div class="chat-main" id="emb-game-chat-panel" style="height: 120px; margin-top: 8px; position: relative;">
+            <div id="emb-game-chat-messages" class="chat-messages chat-messages-tight"></div>
+            <div id="emb-game-chat-hint">press '/' to chat</div>
+            <div class="chat-input-row" id="emb-game-chat-input-row" style="display: none;">
+              <input type="text" id="emb-game-chat-input" placeholder="Say something..." />
+              <button id="emb-game-chat-send-button">Chat</button>
+            </div>
+          </div>
+        </div>
+        <div id="emb-game-right-rail">
+          <h3>Embuscade</h3>
+          <ol id="emb-scoreboard"></ol>
+          <button id="emb-game-leave-button">Leave Game</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="emb-who-modal-overlay" style="display: none;">
+      <div id="emb-who-modal-box">
+        <div id="emb-who-modal-header">
+          <h3>Players</h3>
+          <button id="emb-who-modal-close">✕</button>
+        </div>
+        <ul id="emb-who-modal-list"></ul>
+      </div>
+    </div>
+
+    <div id="emb-game-end-overlay" style="display: none;">
+      <div id="emb-game-end-box">
+        <div id="emb-game-end-header">
+          <canvas id="emb-game-end-sprite" width="32" height="32"></canvas>
+          <h2 id="emb-game-end-title"></h2>
+        </div>
+        <div class="chat-main" style="height: 300px;">
+          <div id="emb-end-chat-messages" class="chat-messages"></div>
+          <div class="chat-input-row">
+            <button id="emb-end-who-button">Who</button>
+            <input type="text" id="emb-end-chat-input" placeholder="Say something..." />
+            <button id="emb-end-chat-send-button">Chat</button>
+          </div>
+        </div>
+        <button id="emb-game-end-leave-button">Leave</button>
+      </div>
+    </div>
+
+    <div id="emb-connection-status">
+      <span id="emb-connection-dot"></span>
+      <span id="emb-connection-text"></span>
+    </div>
+
+
+`;
 
 function isLikelyMobile() {
     const hasCoarsePointer = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
@@ -46,7 +201,58 @@ function getOrCreateSessionToken() {
     return token;
 }
 
-function main() {
+// container: the element to render the game into; mount() owns its
+// contents until the returned unmount() is called.
+// wsUrl: the game server's WebSocket URL -- ws://localhost:8082 standalone,
+// the host's own /embuscade-ws route when embedded (see ./standalone.js).
+// Returns unmount(): closes the socket (no reconnect), stops timers, removes
+// the window/document listeners mount() added, and empties container.
+export function mount(container, { wsUrl }) {
+    let playerId = null;
+    let maze = null;
+    let mazeConfig = null;
+    let tanks = [];
+    let shots = [];
+    let ws = null;
+    let isHost = false;
+    let playerProfile = null;
+    let pingIntervalId = null;
+    let reconnectTimeoutId = null;
+    let chatMessages = [];
+    let disposed = false;
+
+    const identities = new Map();
+
+    container.innerHTML = `<div class="embuscade">${MARKUP}</div>`;
+    const root = container.firstElementChild;
+    const $ = (id) => root.querySelector('#emb-' + id);
+
+    // window/document listeners outlive the markup, so unmount() has to
+    // remove them explicitly -- element listeners go away with innerHTML.
+    const globalListeners = [];
+    function listen(target, type, handler) {
+        target.addEventListener(type, handler);
+        globalListeners.push([target, type, handler]);
+    }
+
+    function unmount() {
+        if (disposed) return;
+        disposed = true;
+        clearInterval(pingIntervalId);
+        clearTimeout(reconnectTimeoutId);
+        if (ws) ws.close();
+        for (const [target, type, handler] of globalListeners) {
+            target.removeEventListener(type, handler);
+        }
+        container.innerHTML = '';
+    }
+
+    if (isLikelyMobile()) {
+        $('mobile-block').style.display = 'flex';
+        $('loading-status').style.display = 'none';
+        return unmount;
+    }
+
     const sessionToken = getOrCreateSessionToken();
 
     function renderSpriteToCanvas(grid, primaryColor, secondaryColor) {
@@ -169,7 +375,7 @@ function main() {
         whoModalOverlay.style.display = 'none';
     }
 
-    document.addEventListener('keydown', (e) => {
+    listen(document, 'keydown', (e) => {
         if (e.key === 'Escape' && whoModalOverlay.style.display !== 'none') {
             closeWhoModal();
         }
@@ -177,87 +383,87 @@ function main() {
 
     // --- Éléments des différents écrans ---
 
-    const whoModalOverlay = document.getElementById('who-modal-overlay');
-    const whoModalClose = document.getElementById('who-modal-close');
-    const whoModalList = document.getElementById('who-modal-list');
+    const whoModalOverlay = $('who-modal-overlay');
+    const whoModalClose = $('who-modal-close');
+    const whoModalList = $('who-modal-list');
 
-    const loadingEl = document.getElementById('loading-status');
-    const dialogEl = document.getElementById('join-dialog');
-    const browserScreenEl = document.getElementById('browser-screen');
-    const builderDialogEl = document.getElementById('builder-dialog');
-    const lobbyScreenEl = document.getElementById('lobby-screen');
-    const gameViewEl = document.getElementById('game-view');
+    const loadingEl = $('loading-status');
+    const dialogEl = $('join-dialog');
+    const browserScreenEl = $('browser-screen');
+    const builderDialogEl = $('builder-dialog');
+    const lobbyScreenEl = $('lobby-screen');
+    const gameViewEl = $('game-view');
 
-    const connectionDotEl = document.getElementById('connection-dot');
-    const connectionTextEl = document.getElementById('connection-text');
+    const connectionDotEl = $('connection-dot');
+    const connectionTextEl = $('connection-text');
 
-    const nameInput = document.getElementById('player-name');
-    const primaryColorInput = document.getElementById('primary-color');
-    const secondaryColorInput = document.getElementById('secondary-color');
-    const presetListEl = document.getElementById('preset-list');
-    const joinButton = document.getElementById('join-button');
+    const nameInput = $('player-name');
+    const primaryColorInput = $('primary-color');
+    const secondaryColorInput = $('secondary-color');
+    const presetListEl = $('preset-list');
+    const joinButton = $('join-button');
 
-    const gamesListEl = document.getElementById('games-list');
-    const browserEmptyMessageEl = document.getElementById('browser-empty-message');
-    const browserCreateButton = document.getElementById('browser-create-button');
-    const browserLeaveButton = document.getElementById('browser-leave-button');
-    const browserChatMessagesEl = document.getElementById('browser-chat-messages');
-    const browserChatInput = document.getElementById('browser-chat-input');
-    const browserChatSendButton = document.getElementById('browser-chat-send-button');
-    const browserWhoButton = document.getElementById('browser-who-button');
+    const gamesListEl = $('games-list');
+    const browserEmptyMessageEl = $('browser-empty-message');
+    const browserCreateButton = $('browser-create-button');
+    const browserLeaveButton = $('browser-leave-button');
+    const browserChatMessagesEl = $('browser-chat-messages');
+    const browserChatInput = $('browser-chat-input');
+    const browserChatSendButton = $('browser-chat-send-button');
+    const browserWhoButton = $('browser-who-button');
 
-    const gameNameInput = document.getElementById('game-name');
-    const gamePasswordInput = document.getElementById('game-password');
-    const humanCountInput = document.getElementById('human-count');
-    const aiCountInput = document.getElementById('ai-count');
-    const humanCountValueEl = document.getElementById('human-count-value');
-    const aiCountValueEl = document.getElementById('ai-count-value');
-    const mazeWidthInput = document.getElementById('maze-width');
-    const mazeLengthInput = document.getElementById('maze-length');
-    const mazeHeightInput = document.getElementById('maze-height');
-    const mazeWidthValueEl = document.getElementById('maze-width-value');
-    const mazeLengthValueEl = document.getElementById('maze-length-value');
-    const mazeHeightValueEl = document.getElementById('maze-height-value');
-    const mazeSizeSummaryEl = document.getElementById('maze-size-summary');
-    const mazeSizeErrorEl = document.getElementById('maze-size-error');
-    const createGameButton = document.getElementById('create-game-button');
+    const gameNameInput = $('game-name');
+    const gamePasswordInput = $('game-password');
+    const humanCountInput = $('human-count');
+    const aiCountInput = $('ai-count');
+    const humanCountValueEl = $('human-count-value');
+    const aiCountValueEl = $('ai-count-value');
+    const mazeWidthInput = $('maze-width');
+    const mazeLengthInput = $('maze-length');
+    const mazeHeightInput = $('maze-height');
+    const mazeWidthValueEl = $('maze-width-value');
+    const mazeLengthValueEl = $('maze-length-value');
+    const mazeHeightValueEl = $('maze-height-value');
+    const mazeSizeSummaryEl = $('maze-size-summary');
+    const mazeSizeErrorEl = $('maze-size-error');
+    const createGameButton = $('create-game-button');
 
-    const lobbyGameNameEl = document.getElementById('lobby-game-name');
-    const lobbySizeEl = document.getElementById('lobby-size');
-    const lobbyRosterEl = document.getElementById('lobby-roster');
-    const startGameButton = document.getElementById('start-game-button');
-    const lobbyLeaveButton = document.getElementById('lobby-leave-button');
-    const lobbyWaitingMessageEl = document.getElementById('lobby-waiting-message');
-    const lobbyChatMessagesEl = document.getElementById('lobby-chat-messages');
-    const lobbyChatInput = document.getElementById('lobby-chat-input');
-    const lobbyChatSendButton = document.getElementById('lobby-chat-send-button');
+    const lobbyGameNameEl = $('lobby-game-name');
+    const lobbySizeEl = $('lobby-size');
+    const lobbyRosterEl = $('lobby-roster');
+    const startGameButton = $('start-game-button');
+    const lobbyLeaveButton = $('lobby-leave-button');
+    const lobbyWaitingMessageEl = $('lobby-waiting-message');
+    const lobbyChatMessagesEl = $('lobby-chat-messages');
+    const lobbyChatInput = $('lobby-chat-input');
+    const lobbyChatSendButton = $('lobby-chat-send-button');
 
-    const gameLeaveButton = document.getElementById('game-leave-button');
-    const gameChatMessagesEl = document.getElementById('game-chat-messages');
-    const gameChatInput = document.getElementById('game-chat-input');
-    const gameChatSendButton = document.getElementById('game-chat-send-button');
+    const gameLeaveButton = $('game-leave-button');
+    const gameChatMessagesEl = $('game-chat-messages');
+    const gameChatInput = $('game-chat-input');
+    const gameChatSendButton = $('game-chat-send-button');
 
-    const gameChatPanelEl = document.getElementById('game-chat-panel');
-    const gameChatHintEl = document.getElementById('game-chat-hint');
-    const gameChatInputRow = document.getElementById('game-chat-input-row');
+    const gameChatPanelEl = $('game-chat-panel');
+    const gameChatHintEl = $('game-chat-hint');
+    const gameChatInputRow = $('game-chat-input-row');
 
-    const scoreTargetInput = document.getElementById('score-target');
-    const scoreTargetValueEl = document.getElementById('score-target-value');
-    const unlimitedTimeCheckbox = document.getElementById('unlimited-time-checkbox');
-    const timeLimitRow = document.getElementById('time-limit-row');
-    const timeLimitInput = document.getElementById('time-limit');
-    const timeLimitValueEl = document.getElementById('time-limit-value');
+    const scoreTargetInput = $('score-target');
+    const scoreTargetValueEl = $('score-target-value');
+    const unlimitedTimeCheckbox = $('unlimited-time-checkbox');
+    const timeLimitRow = $('time-limit-row');
+    const timeLimitInput = $('time-limit');
+    const timeLimitValueEl = $('time-limit-value');
 
-    const gameEndOverlay = document.getElementById('game-end-overlay');
-    const gameEndSprite = document.getElementById('game-end-sprite');
-    const gameEndTitle = document.getElementById('game-end-title');
-    const endChatMessagesEl = document.getElementById('end-chat-messages');
-    const endChatInput = document.getElementById('end-chat-input');
-    const endChatSendButton = document.getElementById('end-chat-send-button');
-    const endWhoButton = document.getElementById('end-who-button');
-    const gameEndLeaveButton = document.getElementById('game-end-leave-button');
+    const gameEndOverlay = $('game-end-overlay');
+    const gameEndSprite = $('game-end-sprite');
+    const gameEndTitle = $('game-end-title');
+    const endChatMessagesEl = $('end-chat-messages');
+    const endChatInput = $('end-chat-input');
+    const endChatSendButton = $('end-chat-send-button');
+    const endWhoButton = $('end-who-button');
+    const gameEndLeaveButton = $('game-end-leave-button');
 
-    const scoreboardEl = document.getElementById('scoreboard');
+    const scoreboardEl = $('scoreboard');
 
     whoModalClose.addEventListener('click', closeWhoModal);
     whoModalOverlay.addEventListener('click', (e) => {
@@ -407,7 +613,7 @@ function main() {
     let endGamePlayersList = [];
 
     function connectSocket() {
-        ws = new WebSocket('ws://localhost:8082');
+        ws = new WebSocket(wsUrl);
 
         ws.addEventListener('open', () => {
             setConnectionStatus(true);
@@ -423,6 +629,7 @@ function main() {
         });
 
         ws.addEventListener('message', (event) => {
+            if (disposed) return;
             const msg = JSON.parse(event.data);
 
             if (msg.type === 'resumed') {
@@ -544,9 +751,11 @@ function main() {
         });
 
         ws.addEventListener('close', () => {
+            clearInterval(pingIntervalId);
+            if (disposed) return;
             setConnectionStatus(false);
             console.log('Disconnected from Bolo server');
-            setTimeout(connectSocket, RECONNECT_RETRY_MS);
+            reconnectTimeoutId = setTimeout(connectSocket, RECONNECT_RETRY_MS);
         });
 
         ws.addEventListener('error', () => {
@@ -880,8 +1089,13 @@ function main() {
         if (inputHandlingReady) return;
         inputHandlingReady = true;
 
-        window.addEventListener('keydown', (e) => {
-            if (document.activeElement === gameChatInput) return; // ne pas piloter le char en tapant un message
+        listen(window, 'keydown', (e) => {
+            // ne pas piloter le char en tapant un message -- any text field,
+            // not just ours, since a host page may have its own inputs too.
+            if (isTextField(e.target)) return;
+            // Only while the game is on screen: keys belong to the host page
+            // (or our own other screens) the rest of the time.
+            if (gameViewEl.style.display === 'none') return;
 
             if (e.key === '/') {
                 e.preventDefault();
@@ -899,19 +1113,21 @@ function main() {
             }
 
             const field = KEY_MAP[e.key];
-            if (!field || input[field]) return;
+            if (!field) return;
+            e.preventDefault(); // arrow keys would otherwise scroll a host page's scroll container
+            if (input[field]) return;
             input[field] = true;
             sendInput();
         });
 
-        window.addEventListener('keyup', (e) => {
+        listen(window, 'keyup', (e) => {
             const field = KEY_MAP[e.key];
             if (!field) return;
             input[field] = false;
             sendInput();
         });
 
-        document.addEventListener('visibilitychange', () => {
+        listen(document, 'visibilitychange', () => {
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: 'visibility', hidden: document.hidden }));
             }
@@ -920,7 +1136,7 @@ function main() {
 
     // --- Rendu du jeu ---
 
-    const canvas = document.getElementById('maze-canvas');
+    const canvas = $('maze-canvas');
     canvas.width = VIEWPORT_WIDTH;
     canvas.height = VIEWPORT_HEIGHT;
     const ctx = canvas.getContext('2d');
@@ -1238,10 +1454,11 @@ function main() {
         drawFog();
         renderScoreboard();
     }
+
+    return unmount;
 }
-if (isLikelyMobile()) {
-    document.getElementById('mobile-block').style.display = 'flex';
-}
-else {
-    main();
+
+function isTextField(el) {
+    return el instanceof HTMLElement
+        && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
 }
