@@ -1,0 +1,13 @@
+{
+  "name": "@bolo/server",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "@bolo/shared": "*",
+    "ws": "^8.18.0"
+  }
+}

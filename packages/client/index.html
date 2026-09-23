@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lobo</title>
+    <style>
+      body { background: #222; color: #eee; font-family: sans-serif; }
+      #level-label { margin: 8px 0; }
+      canvas { background: #000; display: block; }
+
+      #loading-status { padding: 16px; color: #aaa; }
+
+      .screen-with-rail {
+        display: flex;
+        gap: 16px;
+        align-items: flex-start;
+      }
+
+      #join-dialog, #builder-dialog, #lobby-dialog {
+        max-width: 480px;
+        padding: 16px;
+        background: #333;
+        border-radius: 8px;
+      }
+      #browser-dialog {
+        padding: 16px;
+        background: #333;
+        border-radius: 8px;
+        max-width: 480px;
+      }
+      #right-rail, #game-right-rail {
+        width: 220px;
+        padding: 16px;
+        background: #2a2a2a;
+        border-radius: 8px;
+      }
+      #right-rail h3, #game-right-rail h3 { margin-top: 0; font-size: 14px; color: #aaa; }
+
+      #join-dialog label, #builder-dialog label {
+        display: block;
+        margin-top: 12px;
+        margin-bottom: 4px;
+      }
+      #join-dialog input[type="text"], #builder-dialog input[type="text"] {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 6px;
+      }
+      #preset-list { display: flex; gap: 12px; margin-top: 8px; }
+      .preset-option {
+        border: 2px solid #555;
+        border-radius: 4px;
+        padding: 4px;
+        cursor: pointer;
+        background: #222;
+        text-align: center;
+        font-size: 12px;
+      }
+      .preset-option.selected { border-color: #0af; }
+      .preset-option.disabled { opacity: 0.4; cursor: not-allowed; }
+      .preset-option canvas { display: block; image-rendering: pixelated; }
+
+      button {
+        padding: 8px 20px;
+        font-size: 16px;
+        cursor: pointer;
+      }
+      #create-game-button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+      .button-row { display: flex; gap: 8px; margin-top: 16px; }
+
+      .slider-row { display: flex; align-items: center; gap: 8px; }
+      .slider-row input[type="range"] { flex: 1; }
+      #maze-size-summary { margin-top: 10px; font-size: 13px; color: #aaa; }
+      #maze-size-error { margin-top: 6px; font-size: 13px; color: #f66; display: none; }
+
+      #games-list { list-style: none; padding: 0; margin: 12px 0; }
+      #games-list li {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 8px;
+        margin-bottom: 6px;
+        background: #222;
+        border-radius: 4px;
+      }
+      #games-list .game-info { font-size: 13px; }
+      #games-list button { padding: 4px 12px; font-size: 14px; }
+      #browser-empty-message { color: #888; font-size: 13px; }
+
+      #browser-players-list, #lobby-roster { list-style: none; padding: 0; margin: 0; }
+      #browser-players-list li, #lobby-roster li { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+      .roster-sprite { width: 24px; height: 24px; image-rendering: pixelated; }
+
+      #lobby-waiting-message { color: #aaa; font-size: 13px; }
+
+      #game-right-rail { min-height: 480px; }
+
+      #connection-status {
+        position: fixed;
+        left: 12px;
+        bottom: 12px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        color: #f66;
+        z-index: 1000;
+      }
+      #connection-dot { width: 10px; height: 10px; border-radius: 50%; background: #0f0; }
+      #connection-dot.disconnected { background: #f00; animation: connection-blink 1s step-start infinite; }
+      @keyframes connection-blink { 50% { opacity: 0.2; } }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div id="loading-status">Connecting...</div>
+
+      <div id="join-dialog" style="display: none;">
+        <h2>Join Lobo</h2>
+        <label for="player-name">Name</label>
+        <input type="text" id="player-name" maxlength="20" />
+
+        <label for="primary-color">Primary colour</label>
+        <input type="color" id="primary-color" />
+
+        <label for="secondary-color">Secondary colour</label>
+        <input type="color" id="secondary-color" />
+
+        <label>Tank style</label>
+        <div id="preset-list"></div>
+
+        <button id="join-button">Next</button>
+      </div>
+
+      <div id="browser-screen" class="screen-with-rail" style="display: none;">
+        <div id="browser-dialog">
+          <h2>Games</h2>
+          <div class="button-row">
+            <button id="browser-create-button">Create Game</button>
+            <button id="browser-leave-button">Leave Game</button>
+          </div>
+          <ul id="games-list"></ul>
+          <div id="browser-empty-message">No open games -- create one!</div>
+        </div>
+        <div id="right-rail">
+          <h3>Players Online</h3>
+          <ul id="browser-players-list"></ul>
+        </div>
+      </div>
+
+      <div id="builder-dialog" style="display: none;">
+        <h2>Create Game</h2>
+        <label for="game-name">Game name</label>
+        <input type="text" id="game-name" maxlength="120" placeholder="My Lobo Game" />
+
+        <label for="game-password">Password (optional)</label>
+        <input type="text" id="game-password" placeholder="Leave blank for no password" />
+
+        <label for="human-count">Human players: <span id="human-count-value">2</span></label>
+        <div class="slider-row"><input type="range" id="human-count" min="1" max="16" value="2" /></div>
+
+        <label for="ai-count">AI players: <span id="ai-count-value">0</span></label>
+        <div class="slider-row"><input type="range" id="ai-count" min="0" max="15" value="0" /></div>
+
+        <label for="maze-width">Width: <span id="maze-width-value">10</span></label>
+        <div class="slider-row"><input type="range" id="maze-width" min="2" max="10" value="10" /></div>
+
+        <label for="maze-length">Length: <span id="maze-length-value">10</span></label>
+        <div class="slider-row"><input type="range" id="maze-length" min="2" max="10" value="10" /></div>
+
+        <label for="maze-height">Height: <span id="maze-height-value">1</span></label>
+        <div class="slider-row"><input type="range" id="maze-height" min="1" max="10" value="1" /></div>
+
+        <div id="maze-size-summary"></div>
+        <div id="maze-size-error"></div>
+
+        <button id="create-game-button">Create Game</button>
+      </div>
+
+      <div id="lobby-dialog" style="display: none;">
+        <h2 id="lobby-game-name"></h2>
+        <div id="lobby-size"></div>
+        <ul id="lobby-roster"></ul>
+        <div class="button-row">
+          <button id="start-game-button" style="display: none;">Start Game</button>
+          <button id="lobby-leave-button">Leave Game</button>
+        </div>
+        <div id="lobby-waiting-message">Waiting for the host to start the game...</div>
+      </div>
+
+      <div id="game-view" class="screen-with-rail" style="display: none;">
+        <div>
+          <div id="level-label"></div>
+          <canvas id="maze-canvas"></canvas>
+        </div>
+        <div id="game-right-rail">
+          <h3>Lobo</h3>
+          <button id="game-leave-button">Leave Game</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="connection-status">
+      <span id="connection-dot"></span>
+      <span id="connection-text"></span>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

@@ -1,0 +1,52 @@
+# vim <3
+.*.sw?
+*.sw?
+*~
+
+# vim lsp
+.clangd
+
+# jetbrains
+.idea
+
+# cmake
+CMakeCache.txt
+CMakeFiles
+build/
+
+# build artifacts
+*.exe
+*.dll
+*.o
+*.depend
+lib/
+bin/
+
+# clangd/vim
+compile_commands.json
+
+# vulkan
+*.spv
+
+# idiot python, of all stupid things
+.env
+lib64
+share
+pyvenv.cfg
+
+# c#
+obj/
+artifacts/
+
+# personal trauma
+oput
+jimmy*.png
+
+# clangd
+.cache
+
+# visual studio
+.vs/
+
+# node
+node_modules

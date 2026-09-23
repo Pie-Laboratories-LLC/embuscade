@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package bolo;
+
+service GameSession {
+  rpc Play(stream PlayerInput) returns (stream GameState);
+}
+
+message PlayerInput {
+  bool turnLeft = 1;
+  bool turnRight = 2;
+  bool throttleUp = 3;
+  bool throttleDown = 4;
+}
+
+message GameState {
+  TankState tank = 1;
+}
+
+message TankState {
+  float x = 1;
+  float y = 2;
+  int32 z = 3;          // niveau du labyrinthe
+  float heading = 4;     // 0-7, une des 8 directions
+  float speed = 5;
+}

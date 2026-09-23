@@ -1,0 +1,13 @@
+{
+  "name": "@bolo/shared",
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    "./Wilson.js": "./Wilson.js",
+    "./Direction.js": "./Direction.js",
+    "./Random.js": "./Random.js",
+    "./MazeGeometry.js": "./MazeGeometry.js",
+    "./PresetSprites.js": "./PresetSprites.js",
+    "./Theme.js": "./Theme.js"
+  }
+}
