@@ -16,7 +16,7 @@ function makeButton(label, getHandler) {
     return button;
 }
 
-function buildSplash() {
+function buildSplash(container) {
     const overlay = document.createElement('div');
     overlay.className = 'splash-overlay';
 
@@ -37,13 +37,27 @@ function buildSplash() {
     frame.appendChild(image);
     frame.appendChild(buttons);
     overlay.appendChild(frame);
-    document.body.appendChild(overlay);
+    container.appendChild(overlay);
     return overlay;
 }
 
-export function showSplashScreen({ onJoin, onHelp }) {
+// container: mount()'s own root (.embuscade) -- appended there, not
+// document.body, so this stays position:absolute-contained within
+// whatever area the host gave the game (see embuscade.css's header
+// comment) instead of covering the whole viewport, host page included.
+export function showSplashScreen(container, { onJoin, onHelp }) {
     handlers = { onJoin, onHelp };
-    if (!splashEl) splashEl = buildSplash();
+    if (!splashEl) {
+        splashEl = buildSplash(container);
+    } else if (!container.contains(splashEl)) {
+        // A previous mount's container (and this element along with it) was
+        // torn down by unmount()'s container.innerHTML = '' -- splashEl is a
+        // detached orphan at this point (the module itself persists across
+        // mount/unmount cycles since the host re-imports the same cached ES
+        // module rather than re-executing it), so it needs re-parenting into
+        // the new container rather than just having its display toggled.
+        container.appendChild(splashEl);
+    }
     splashEl.style.display = 'flex';
 }
 

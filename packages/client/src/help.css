@@ -1,5 +1,5 @@
 .help-overlay {
-    position: fixed;
+    position: absolute;
     inset: 0;
     display: none;
     align-items: center;

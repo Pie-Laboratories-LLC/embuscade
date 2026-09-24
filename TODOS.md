@@ -15,6 +15,9 @@ Good — here's the full list as it stands, reordered per tonight's adjustments:
 11. README
 12. Custom pixel-editor UI (the "Custom (soon)" stub in the tank picker)
 13. github actions builds for the client, server, and docker image.
+14. themes for games, jungle, desert, arctic, etc.
+15. proper splash screen
+16. proper sprites for powerups
 
 powerups:
 

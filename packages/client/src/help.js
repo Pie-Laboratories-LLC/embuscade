@@ -43,7 +43,7 @@ function rewriteContent(fragment) {
     }
 }
 
-function buildHelp() {
+function buildHelp(container) {
     const overlay = document.createElement('div');
     overlay.className = 'help-overlay';
     overlay.addEventListener('click', (event) => {
@@ -76,12 +76,20 @@ function buildHelp() {
     panel.appendChild(header);
     panel.appendChild(body);
     overlay.appendChild(panel);
-    document.body.appendChild(overlay);
+    container.appendChild(overlay);
     return overlay;
 }
 
-export function showHelpModal() {
-    if (!helpEl) helpEl = buildHelp();
+// container: mount()'s own root (.embuscade) -- see showSplashScreen()'s
+// comment in splash.js for why this can't be document.body.
+export function showHelpModal(container) {
+    if (!helpEl) {
+        helpEl = buildHelp(container);
+    } else if (!container.contains(helpEl)) {
+        // See showSplashScreen()'s comment in splash.js -- same re-parenting
+        // need, since this module's state also outlives a mount/unmount cycle.
+        container.appendChild(helpEl);
+    }
     helpEl.style.display = 'flex';
     helpEl.querySelector('.help-body').scrollTop = 0;
     document.addEventListener('keydown', onKeyDown);

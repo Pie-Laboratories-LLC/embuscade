@@ -1,9 +1,18 @@
+// Sounds live in public/, served at the site root in dev (vite serves
+// public/ from '/') but at wherever the built embuscade.js itself ends up
+// (site root standalone, /widgets/embuscade-vendor/ when vendored into
+// widgetgrid -- see EmbuscadeWidget.vue's VENDOR_BASE) once bundled, since
+// dist/ mirrors public/ 1:1 next to embuscade.js. import.meta.env.DEV is
+// baked in at build time, so the vendored bundle (always built, never
+// served via `vite dev`) correctly resolves against its own location.
+const SOUND_BASE = import.meta.env.DEV ? '/' : new URL('.', import.meta.url).href;
+
 const SOUND_FILES = {
-    shot: '/sounds/528262__magnuswaker__silenced-shot.wav',
-    hit: '/sounds/420673__sypherzent__basic-melee-hit.wav',
-    wall: '/sounds/743259__qubodup__short-rusty-metal-scrape.wav',
-    explosion: '/sounds/609587__unfa__grenade-explosion-sfx-medium-sized-meaty-realistic.wav',
-    collision: '/sounds/812592__qubodup__clang.wav',
+    shot: `${SOUND_BASE}sounds/528262__magnuswaker__silenced-shot.wav`,
+    hit: `${SOUND_BASE}sounds/420673__sypherzent__basic-melee-hit.wav`,
+    wall: `${SOUND_BASE}sounds/743259__qubodup__short-rusty-metal-scrape.wav`,
+    explosion: `${SOUND_BASE}sounds/609587__unfa__grenade-explosion-sfx-medium-sized-meaty-realistic.wav`,
+    collision: `${SOUND_BASE}sounds/812592__qubodup__clang.wav`,
     // power-up sounds slotteront ici plus tard: missile, doubleBarrel,
     // ram, sprayOil, slipOil -- même mécanisme, juste de nouvelles clés
 };

@@ -505,9 +505,9 @@ export function mount(container, { wsUrl }) {
 
     function showSplash() {
         hideAllScreens();
-        showSplashScreen({
+        showSplashScreen(root, {
             onJoin: showJoinDialog,
-            onHelp: showHelpModal
+            onHelp: () => showHelpModal(root)
         });
     }
 
