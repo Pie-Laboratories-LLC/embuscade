@@ -1,6 +1,7 @@
 import { Direction } from '@bolo/shared/Direction.js';
 import { PRESET_SPRITES } from '@bolo/shared/PresetSprites.js';
-import { computeDistances } from './server.js';
+import { isAfk, computeDistances } from './server.js';
+
 
 const AI_NAMES = [
     'Fred', 'Wilma', 'Betty', 'Barney', 'Zoe', 'Samantha', 'Spencer',
@@ -106,6 +107,18 @@ function refillWaypoints(game, tank) {
     }
 }
 
+function findVisiblePowerUp(game, tank) {
+    for (const p of game.powerUps) {
+        if (p.z !== tank.z) continue;
+        const center = cellCenter(game, p.cellX, p.cellY);
+        const dx = center.x - tank.x;
+        const dy = center.y - tank.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist <= AI_DETECTION_RADIUS) return p;
+    }
+    return null;
+}
+
 function steerToward(tank, targetX, targetY, dt) {
     const dx = targetX - tank.x;
     const dy = targetY - tank.y;
@@ -130,6 +143,7 @@ function findVisibleTarget(game, tank) {
     for (const other of game.tanks.values()) {
         if (other.isAI) continue;
         if (other.dead) continue;
+        if (isAfk(other, game.started)) continue;
         if (other.z !== tank.z) continue;
 
         const dx = other.x - tank.x;
@@ -170,7 +184,6 @@ export function updateAITank(game, tank, dt, trySpawnShot, computeDistances) {
 
         const targetCell = cellOf(game, target.x, target.y);
         const distances = computeDistances(game, [[target.z, targetCell.cellY, targetCell.cellX]]);
-
         const myCell = cellOf(game, tank.x, tank.y);
         const neighbors = getOpenNeighbors(game, tank.z, myCell.cellY, myCell.cellX);
 
@@ -189,12 +202,40 @@ export function updateAITank(game, tank, dt, trySpawnShot, computeDistances) {
             const center = cellCenter(game, bestNeighbor.cellX, bestNeighbor.cellY);
             steerToward(tank, center.x, center.y, dt);
         } else {
-            // aucun voisin ne rapproche (rare, ex. déjà dans la cellule
-            // cible) -- vise directement le joueur pour ce tick
             steerToward(tank, target.x, target.y, dt);
         }
 
         fireIfAligned(game, tank, target.x, target.y, trySpawnShot);
+        return;
+    }
+
+    const powerUp = findVisiblePowerUp(game, tank);
+    if (powerUp) {
+        tank.aiState = 'seekPowerUp';
+        tank.aiWaypoints = [];
+
+        const distances = computeDistances(game, [[powerUp.z, powerUp.cellY, powerUp.cellX]]);
+        const myCell = cellOf(game, tank.x, tank.y);
+        const neighbors = getOpenNeighbors(game, tank.z, myCell.cellY, myCell.cellX);
+
+        let bestNeighbor = null;
+        let bestDist = Infinity;
+        for (const n of neighbors) {
+            const key = `${n.z},${n.cellY},${n.cellX}`;
+            const d = distances.get(key);
+            if (d !== undefined && d < bestDist) {
+                bestDist = d;
+                bestNeighbor = n;
+            }
+        }
+
+        if (bestNeighbor) {
+            const center = cellCenter(game, bestNeighbor.cellX, bestNeighbor.cellY);
+            steerToward(tank, center.x, center.y, dt);
+        } else {
+            const center = cellCenter(game, powerUp.cellX, powerUp.cellY);
+            steerToward(tank, center.x, center.y, dt);
+        }
         return;
     }
 

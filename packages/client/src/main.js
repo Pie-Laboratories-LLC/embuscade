@@ -2,6 +2,10 @@ import { Direction } from '@bolo/shared/Direction.js';
 import { getVerticalIcons } from '@bolo/shared/MazeGeometry.js';
 import { PRESET_SPRITES, TRANSPARENT } from '@bolo/shared/PresetSprites.js';
 import { DEFAULT_THEME } from '@bolo/shared/Theme.js';
+import { initAudio, resumeAudioContext, playPositional } from './AudioManager.js';
+import { loadFonts, STENCIL_FONT_FAMILY } from './fonts.js';
+import { showSplashScreen, hideSplashScreen } from './splash.js';
+import { showHelpModal, hideHelpModal } from './help.js';
 import './embuscade.css';
 
 const TANK_RADIUS = 14;
@@ -43,7 +47,10 @@ const MARKUP = `
         <label>Tank style</label>
         <div id="emb-preset-list"></div>
 
-        <button id="emb-join-button">Next</button>
+        <div class="button-row">
+          <button id="emb-join-button">Next</button>
+          <button id="emb-join-cancel-button">Cancel</button>
+        </div>
       </div>
 
       <div id="emb-browser-screen" class="screen-with-rail" style="display: none;">
@@ -103,7 +110,10 @@ const MARKUP = `
           <input type="range" id="emb-time-limit" min="2" max="60" value="15" />
         </div>
 
-        <button id="emb-create-game-button">Create Game</button>
+        <div class="button-row">
+          <button id="emb-create-game-button">Create Game</button>
+          <button id="emb-builder-cancel-button">Cancel</button>
+        </div>
       </div>
 
       <div id="emb-lobby-screen" class="screen-with-rail" style="display: none;">
@@ -226,6 +236,7 @@ export function mount(container, { wsUrl }) {
     container.innerHTML = `<div class="embuscade">${MARKUP}</div>`;
     const root = container.firstElementChild;
     const $ = (id) => root.querySelector('#emb-' + id);
+    let powerUps = [];
 
     // window/document listeners outlive the markup, so unmount() has to
     // remove them explicitly -- element listeners go away with innerHTML.
@@ -376,8 +387,13 @@ export function mount(container, { wsUrl }) {
     }
 
     listen(document, 'keydown', (e) => {
-        if (e.key === 'Escape' && whoModalOverlay.style.display !== 'none') {
-            closeWhoModal();
+        if (e.key === 'Escape') {
+            if(whoModalOverlay.style.display !== 'none') {
+                closeWhoModal();
+            }
+            else if (builderDialogEl.style.display !== 'none') {
+                showBrowserScreen();
+            }
         }
     });
 
@@ -402,6 +418,7 @@ export function mount(container, { wsUrl }) {
     const secondaryColorInput = $('secondary-color');
     const presetListEl = $('preset-list');
     const joinButton = $('join-button');
+    const joinCancelButton = $('join-cancel-button');
 
     const gamesListEl = $('games-list');
     const browserEmptyMessageEl = $('browser-empty-message');
@@ -427,6 +444,7 @@ export function mount(container, { wsUrl }) {
     const mazeSizeSummaryEl = $('maze-size-summary');
     const mazeSizeErrorEl = $('maze-size-error');
     const createGameButton = $('create-game-button');
+    const cancelCreateGameButton = $('builder-cancel-button');
 
     const lobbyGameNameEl = $('lobby-game-name');
     const lobbySizeEl = $('lobby-size');
@@ -477,6 +495,20 @@ export function mount(container, { wsUrl }) {
         builderDialogEl.style.display = 'none';
         lobbyScreenEl.style.display = 'none';
         gameViewEl.style.display = 'none';
+        hideSplashScreen();
+    }
+
+    function showJoinDialog() {
+        hideAllScreens();
+        dialogEl.style.display = 'block';
+    }
+
+    function showSplash() {
+        hideAllScreens();
+        showSplashScreen({
+            onJoin: showJoinDialog,
+            onHelp: showHelpModal
+        });
     }
 
     function showBrowserScreen() {
@@ -598,6 +630,7 @@ export function mount(container, { wsUrl }) {
     secondaryColorInput.addEventListener('input', refreshAllPreviews);
 
     joinButton.addEventListener('click', () => {
+        resumeAudioContext();
         const name = nameInput.value.trim() || 'Player';
         const primaryColor = primaryColorInput.value;
         const secondaryColor = secondaryColorInput.value;
@@ -607,6 +640,10 @@ export function mount(container, { wsUrl }) {
         playerProfile = { name, primaryColor, secondaryColor, sprite };
 
         showBrowserScreen();
+    });
+    joinCancelButton.addEventListener('click', () => {
+        hideAllScreens()
+        showSplash();
     });
 
     // --- Connexion WebSocket ---
@@ -670,19 +707,9 @@ export function mount(container, { wsUrl }) {
                     renderLobby(msg);
                 }
             } else if (msg.type === 'resume-failed') {
-                const savedProfile = loadSavedProfile();
-                if (savedProfile) {
-                    playerProfile = {
-                        name: savedProfile.name,
-                        primaryColor: savedProfile.primaryColor,
-                        secondaryColor: savedProfile.secondaryColor,
-                        sprite: PRESET_SPRITES[savedProfile.preset] ?? PRESET_SPRITES.tank
-                    };
-                    showBrowserScreen();
-                } else {
-                    hideAllScreens();
-                    dialogEl.style.display = 'block';
-                }
+                localStorage.removeItem(SESSION_TOKEN_KEY);
+                hideAllScreens();
+                showSplash();
             } else if (msg.type === 'games-list') {
                 renderGamesList(msg.games);
             } else if (msg.type === 'browser-players') {
@@ -730,6 +757,15 @@ export function mount(container, { wsUrl }) {
             } else if (msg.type === 'state') {
                 tanks = msg.tanks;
                 shots = msg.shots;
+                powerUps = msg.powerUps;
+
+                const myTank = findMyTank();
+                if (myTank && msg.sfx) {
+                    for (const event of msg.sfx) {
+                        playPositional(event.type, event.x, event.y, event.z, myTank.x, myTank.y, myTank.z);
+                    }
+                }
+
                 drawScene();
             } else if (msg.type === 'game-ended') {
                 endGamePlayersList = msg.scores;
@@ -763,6 +799,8 @@ export function mount(container, { wsUrl }) {
         });
     }
 
+    initAudio();
+    loadFonts();
     hideAllScreens();
     loadingEl.style.display = 'block';
     connectSocket();
@@ -821,7 +859,7 @@ export function mount(container, { wsUrl }) {
 
     browserLeaveButton.addEventListener('click', () => {
         hideAllScreens();
-        dialogEl.style.display = 'block';
+        showSplash();
     });
 
     browserChatSendButton.addEventListener('click', () => {
@@ -956,6 +994,10 @@ export function mount(container, { wsUrl }) {
             scoreTarget: parseInt(scoreTargetInput.value, 10),
             timeLimitMs: unlimitedTimeCheckbox.checked ? null : parseInt(timeLimitInput.value, 10),
         }));
+    });
+
+    cancelCreateGameButton.addEventListener('click', () => {
+        showBrowserScreen();
     });
 
     updateMazeSizeSummary();
@@ -1128,6 +1170,10 @@ export function mount(container, { wsUrl }) {
         });
 
         listen(document, 'visibilitychange', () => {
+            if (!document.hidden) {
+                resumeAudioContext();
+            }
+
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: 'visibility', hidden: document.hidden }));
             }
@@ -1182,7 +1228,7 @@ export function mount(container, { wsUrl }) {
                 ctx.stroke();
 
                 const icons = getVerticalIcons(mazeConfig.cellSize, x, y, cell, Direction);
-                ctx.font = 'bold 32px sans-serif';
+                ctx.font = `20px "${STENCIL_FONT_FAMILY}", sans-serif`;
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
                 for (const icon of icons) {
@@ -1230,19 +1276,51 @@ export function mount(container, { wsUrl }) {
 
     function drawHealthBar(tank) {
         const health = tank.health ?? 100;
-        const primaryFraction = Math.min(health, 100) / 100;
-        const overflowFraction = Math.max(0, health - 100) / 100;
+        const maxHealth = tank.maxHealth ?? 100;
 
         const barLeft = TANK_RADIUS + HEALTH_BAR_GAP;
         const barTop = -HEALTH_BAR_HEIGHT / 2;
 
         ctx.save();
         ctx.rotate(Math.PI / 2);
-        drawHealthBarColumn(barLeft, barTop, primaryFraction);
-        if (health > 100) {
-            drawHealthBarColumn(barLeft + HEALTH_BAR_WIDTH + HEALTH_BAR_SPACING, barTop, overflowFraction);
+
+        // chaque colonne représente 100 points de vie -- le nombre de colonnes
+        // dépend de maxHealth (1 colonne à 100, 2 colonnes à 200), pas d'un
+        // seuil fixe
+        const columnCount = Math.ceil(maxHealth / 100);
+        for (let col = 0; col < columnCount; col++) {
+            const columnMin = col * 100;
+            const columnMax = Math.min(maxHealth, columnMin + 100);
+            const columnCapacity = columnMax - columnMin;
+            const healthInColumn = Math.max(0, Math.min(health, columnMax) - columnMin);
+            const fraction = columnCapacity > 0 ? healthInColumn / columnCapacity : 0;
+
+            const x = barLeft + col * (HEALTH_BAR_WIDTH + HEALTH_BAR_SPACING);
+            drawHealthBarColumn(x, barTop, fraction);
         }
+
         ctx.restore();
+    }
+
+    const POWERUP_ICONS = {
+        health: '⚕️',
+        healthBoost: '💗'
+    };
+
+
+    function drawPowerUps(camX, camY, localZ) {
+        ctx.font = 'bold 24px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        for (const p of powerUps) {
+            if (p.z !== localZ) continue;
+            const centerX = p.cellX * mazeConfig.cellSize + mazeConfig.cellSize / 2;
+            const centerY = p.cellY * mazeConfig.cellSize + mazeConfig.cellSize / 2;
+            const screenX = centerX - camX + VIEWPORT_WIDTH / 2;
+            const screenY = centerY - camY + VIEWPORT_HEIGHT / 2;
+            ctx.fillText(POWERUP_ICONS[p.type] ?? '?', screenX, screenY);
+        }
     }
 
     function drawAfkLabel(screenX, screenY) {
@@ -1434,6 +1512,7 @@ export function mount(container, { wsUrl }) {
         }
 
         drawMazeLevel(localZ, camX, camY, myTank);
+        drawPowerUps(camX, camY, localZ);
 
         for (const tank of tanks) {
             if (tank.dead) continue;

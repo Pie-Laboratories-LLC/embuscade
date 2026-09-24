@@ -28,6 +28,11 @@ const CHAT_MAX_BYTES = 256;
 const CHAT_RATE_LIMIT_MS = 1000;
 const RESPAWN_DELAY_MS = 3500;
 const DEFAULT_SCORE_TARGET = 10;
+const POWERUP_MAX_COUNT_MATCHES_PLAYERS = true; // aussi de puissants qu'il y a de joueurs, comme spécifié
+const POWERUP_SPAWN_INTERVAL_MS = 7500;
+const POWERUP_RESPAWN_DELAY_MS = 5000;
+
+let nextPowerUpId = 1;
 
 const FIRE_KEY_OFFSETS = {
     fireForward: 0,
@@ -130,7 +135,9 @@ function createGame(config) {
         timeLimitMs: config.timeLimitMs,
         startedAt: null,
         ended: false,
-        powerUps: []
+        powerUps: [],
+        lastPowerUpSpawnAttempt: 0,
+        sfxEvents: []
     };
 
     games.set(gameId, game);
@@ -168,10 +175,87 @@ function collidesWithWall(game, x, y, z) {
     return false;
 }
 
-function isAfk(tank, requireIdleCheck = true) {
+export function isAfk(tank, requireIdleCheck = true) {
     if (tank.disconnected || tank.tabHidden) return true;
     if (!requireIdleCheck) return false;
     return Date.now() - tank.lastActivityTime > AFK_TIMEOUT_MS;
+}
+
+function emitSfx(game, type, x, y, z) {
+    game.sfxEvents.push({ type, x, y, z });
+}
+
+function totalPlayerCount(game) {
+    return game.tanks.size;
+}
+
+function totalCellCount(game) {
+    return (game.width * game.length * game.height);
+}
+
+function getTankOccupiedCells(game) {
+    return Array.from(game.tanks.values())
+        .filter(t => !t.dead)
+        .map(t => [t.z, Math.floor(t.y / game.cellSize), Math.floor(t.x / game.cellSize)]);
+}
+
+function getPowerUpCellsOccupied(game) {
+    return game.powerUps.map(p => [p.z, p.cellY, p.cellX]);
+}
+
+function trySpawnPowerUp(game) {
+/*    const maxCount = totalPlayerCount(game); */
+/*    const maxCount = (game.width * game.length * game.height) / 4; */
+    const maxCount = Math.min(Math.floor(totalCellCount(game) / 4), totalPlayerCount(game) * 3)
+    if (game.powerUps.length >= maxCount) return;
+
+    const occupied = [...getTankOccupiedCells(game), ...getPowerUpCellsOccupied(game)];
+    const cell = findFarthestCell(game, occupied);
+    if (!cell) return; // carte trop pleine, on retentera au prochain cycle
+
+    const [z, cellY, cellX] = cell;
+    const type = POWERUP_TYPES[Math.floor(Math.random() * POWERUP_TYPES.length)];
+
+    game.powerUps.push({
+        id: nextPowerUpId++,
+        type,
+        z, cellY, cellX
+    });
+}
+
+// v1: seulement health et healthBoost -- les dix autres types viendront
+// s'ajouter à cette liste au fur et à mesure de leur implémentation
+const POWERUP_TYPES = ['health', 'healthBoost'];
+
+function applyPowerUpEffect(tank, type) {
+    if (type === 'health') {
+        tank.health = Math.min(tank.maxHealth, tank.health + 50);
+    } else if (type === 'healthBoost') {
+        tank.maxHealth = Math.min(200, tank.maxHealth + 100);
+        tank.health = Math.min(tank.maxHealth, tank.health + 100);
+    }
+}
+
+const POWERUP_HIT_RADIUS = TANK_RADIUS + 20;
+
+function checkPowerUpPickups(game) {
+    for (const tank of game.tanks.values()) {
+        if (tank.dead) continue;
+
+        const hitIndex = game.powerUps.findIndex(p => {
+            if (p.z !== tank.z) return false;
+            const centerX = p.cellX * game.cellSize + game.cellSize / 2;
+            const centerY = p.cellY * game.cellSize + game.cellSize / 2;
+            const dx = tank.x - centerX;
+            const dy = tank.y - centerY;
+            return Math.sqrt(dx * dx + dy * dy) < POWERUP_HIT_RADIUS;
+        });
+        if (hitIndex === -1) continue;
+
+        const powerUp = game.powerUps[hitIndex];
+        applyPowerUpEffect(tank, powerUp.type);
+        game.powerUps.splice(hitIndex, 1);
+    }
 }
 
 function checkVerticalTransition(game, tank) {
@@ -246,6 +330,7 @@ function updateTank(game, tank, dt) {
 
     if (collidesWithWall(game, proposedX, proposedY, tank.z)) {
         tank.health = Math.max(0, tank.health - tank.speed * 0.3);
+        emitSfx(game, 'wall', tank.x, tank.y, tank.z);
         tank.speed = 0;
     } else {
         tank.x = proposedX;
@@ -295,6 +380,8 @@ function resolveTankCollisions(game) {
             const closingSpeed = Math.max(0, relVx * normalX + relVy * normalY);
             const damage = closingSpeed * RAM_DAMAGE_SCALE;
 
+            emitSfx(game, 'collision', a.x, a.y, a.z);
+
             if (!isAfk(a,game.started)) {
                 a.health = Math.max(0, a.health - damage);
                 if (a.health === 0) a.killedByCandidate = b.playerId;
@@ -330,6 +417,7 @@ function trySpawnShot(game, tank, offsetKey) {
         heading,
         distanceTraveled: 0
     });
+    emitSfx(game, 'shot', tank.x, tank.y, tank.z);
 }
 
 function updateShots(game, dt) {
@@ -370,6 +458,7 @@ function resolveShotHits(game) {
                     tank.health = Math.max(0, tank.health - 25);
                     if (tank.health === 0) tank.killedBy = shot.ownerId;
                 }
+                emitSfx(game, 'hit', tank.x, tank.y, tank.z);
                 game.shots.delete(shot.shotId);
                 break;
             }
@@ -389,6 +478,10 @@ function broadcastGameState(game) {
         z: s.z
     }));
 
+    const powerUpsPayload = game.powerUps.map(p => ({
+        id: p.id, type: p.type, z: p.z, cellX: p.cellX, cellY: p.cellY
+    }));
+
     for (const recipient of tankList) {
         if (!recipient.ws || recipient.ws.readyState !== recipient.ws.OPEN) continue;
 
@@ -401,6 +494,7 @@ function broadcastGameState(game) {
                     y: t.y,
                     z: t.z,
                     health: t.health,
+                    maxHealth: t.maxHealth,
                     heading: t.heading,
                     speed: t.speed,
                     dead: t.dead,
@@ -421,10 +515,13 @@ function broadcastGameState(game) {
                           }
                         : null
                 })),
-            shots: shotsPayload
+            shots: shotsPayload,
+            sfx: game.sfxEvents,
+            powerUps: powerUpsPayload,
         });
 
         recipient.ws.send(message);
+        game.sfxEvents = [];
     }
 }
 
@@ -466,7 +563,7 @@ function startGame(game) {
             primaryColor: identity.primaryColor,
             secondaryColor: identity.secondaryColor,
             sprite: identity.sprite,
-            x: 0, y: 0, z: 0, heading: 0, speed: 0, health: 100,
+            x: 0, y: 0, z: 0, heading: 0, speed: 0, health: 100, maxHealth: 100,
             score: 0, lastScoreTime: null,
             dead: false, deathTime: null,
             transitioning: false, transitionFromZ: null, transitionToZ: null,
@@ -492,6 +589,7 @@ function startGame(game) {
         tank.heading = 0;
         tank.speed = 0;
         tank.health = 100;
+        tank.maxHealth = 100;
         tank.transitioning = false;
         tank.transitionFromZ = null;
         tank.transitionToZ = null;
@@ -683,6 +781,7 @@ function checkDeaths(game) {
         tank.dead = true;
         tank.deathTime = Date.now();
         tank.speed = 0;
+        emitSfx(game, 'explosion', tank.x, tank.y, tank.z);
         newlyDead.push(tank);
     }
 
@@ -716,6 +815,7 @@ function respawnDeadTanks(game) {
         tank.heading = 0;
         tank.speed = 0;
         tank.health = 100;
+        tank.maxHealth = 100;
         tank.dead = false;
         tank.deathTime = null;
         tank.transitioning = false;
@@ -787,6 +887,11 @@ function tick() {
     for (const game of games.values()) {
         if (!game.started || game.ended) continue;
 
+        if (now - game.lastPowerUpSpawnAttempt >= POWERUP_SPAWN_INTERVAL_MS) {
+            game.lastPowerUpSpawnAttempt = now;
+            trySpawnPowerUp(game);
+        }
+
         for (const tank of game.tanks.values()) {
             if (tank.dead) continue;
             if (tank.isAI) updateAITank(game, tank, dt, trySpawnShot, computeDistances);
@@ -798,6 +903,7 @@ function tick() {
         resolveShotHits(game);
         checkDeaths(game);
         respawnDeadTanks(game);
+        checkPowerUpPickups(game);
         checkGameEnd(game);
         broadcastGameState(game);
     }
@@ -966,7 +1072,7 @@ wss.on('connection', (ws) => {
                 sprite: msg.sprite,
                 dead: false,
                 deathTime: null,
-                x: 0, y: 0, z: 0, heading: 0, speed: 0, health: 100,
+                x: 0, y: 0, z: 0, heading: 0, speed: 0, health: 100, maxHealth: 100,
                 transitioning: false, transitionFromZ: null, transitionToZ: null,
                 transitionStartTime: null, verticalCooldown: null,
                 lastActivityTime: Date.now(), tabHidden: false, disconnected: false,
@@ -1017,7 +1123,7 @@ wss.on('connection', (ws) => {
                 sprite: msg.sprite,
                 dead: false,
                 deathTime: null,
-                x: 0, y: 0, z: 0, heading: 0, speed: 0, health: 100,
+                x: 0, y: 0, z: 0, heading: 0, speed: 0, health: 100, maxHealth: 100,
                 transitioning: false, transitionFromZ: null, transitionToZ: null,
                 transitionStartTime: null, verticalCooldown: null,
                 lastActivityTime: Date.now(), tabHidden: false, disconnected: false,
