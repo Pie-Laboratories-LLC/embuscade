@@ -10,6 +10,16 @@ You may lose connection to the server periodically, e.g., with network
 hiccoughs.  It should automatically reconnect after a short period.  If the
 server is ever down, embuscade cannot be played.
 
+# Voice chat
+
+🔊🔇
+
+Next to the little green dot is the voice chat icon.  🔇 indicates voice chat is
+disabled.  It is disabled everywhere except the Start Game Lobby, the Game
+itself, and the End Game Dialog.  On those screens, voice chat can be toggled on
+and off with the right control button.  On reverting to the Browser Lobby, the
+voice chat state is saved for the next game joined.
+
 # Joining the game
 
 ![Join Game](docs/Join-Game.png)
@@ -86,6 +96,11 @@ If the host disconnects, he or she can reconnect within 60 seconds.  Barring
 that, after 60 seconds a new host is chosen among the other human players.  The
 original host can rejoin, but the new host remains the same.
 
+After the game ends, players are presented with the End Game Dialog.  Leaving
+that dialog returns to the lobby.  Any players still on the Leave Game Dialog
+are greyed out; the host is only able to restart the game when all players have
+left the Leave Game Dialog.
+
 # Who Dialog
 
 ![Who Dialog](docs/Who-Dialog.png)
@@ -121,3 +136,17 @@ Currently, there are two power ups:
 
 The game commences until one player reaches the maximum score or the time limit
 expires.
+
+Sometimes the chat will show that one player slew another player, but the
+scoreboard does not update.  This is because a ramming death in which both
+players die does not count towards the score.
+
+# End Game Dialog
+
+![End Game Dialog](docs/End-Game.png)
+
+When the victory condition is met - i.e., when a player reaches the configured
+total score or the time limit expires, the End Game Dialog is shown.  This
+simply shows the winner and allows players to chat.  Leaving the End Game Dialog
+returns the player to the Start Game Lobby.  Once all players have left the End
+Game Dialog, the host may opt to restart the game.

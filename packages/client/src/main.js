@@ -6,6 +6,8 @@ import { initAudio, resumeAudioContext, playPositional } from './AudioManager.js
 import { loadFonts, STENCIL_FONT_FAMILY } from './fonts.js';
 import { showSplashScreen, hideSplashScreen } from './splash.js';
 import { showHelpModal, hideHelpModal } from './help.js';
+import { Builder } from './builder.js';
+import { createVoiceChat } from './voiceChat.js';
 import './embuscade.css';
 
 const TANK_RADIUS = 14;
@@ -17,7 +19,7 @@ const PING_INTERVAL_MS = 25000;
 const RECONNECT_RETRY_MS = 2000;
 const PROFILE_STORAGE_KEY = 'bolo:playerProfile';
 const SESSION_TOKEN_KEY = 'bolo:sessionToken';
-const CELLS_PER_PLAYER = 6.25;
+const VOICE_CHAT_STORAGE_KEY = 'bolo:voiceChatEnabled';
 
 // Everything mount() renders into its container. Ids are emb- prefixed so
 // they can't collide with a host page's own (see embuscade.css's header).
@@ -48,7 +50,7 @@ const MARKUP = `
         <div id="emb-preset-list"></div>
 
         <div class="button-row">
-          <button id="emb-join-button">Next</button>
+          <button id="emb-join-button">Join</button>
           <button id="emb-join-cancel-button">Cancel</button>
         </div>
       </div>
@@ -58,7 +60,7 @@ const MARKUP = `
           <div id="emb-browser-chat-messages" class="chat-messages"></div>
           <div class="chat-input-row">
             <button id="emb-browser-who-button">Who</button>
-            <input type="text" id="emb-browser-chat-input" placeholder="Say something..." />
+            <input type="text" id="emb-browser-chat-input" placeholder="/ Say something" />
             <button id="emb-browser-chat-send-button">Chat</button>
           </div>
         </div>
@@ -74,7 +76,7 @@ const MARKUP = `
       </div>
 
       <div id="emb-builder-dialog" style="display: none;">
-        <h2>Create Game</h2>
+        <h2 id="emb-builder-title">Create Game</h2>
         <label for="emb-game-name">Game name</label>
         <input type="text" id="emb-game-name" maxlength="120" placeholder="My Embuscade Game" />
 
@@ -120,13 +122,14 @@ const MARKUP = `
         <div class="chat-main">
           <div id="emb-lobby-chat-messages" class="chat-messages"></div>
           <div class="chat-input-row">
-            <input type="text" id="emb-lobby-chat-input" placeholder="Say something..." />
+            <input type="text" id="emb-lobby-chat-input" placeholder="/ Say something" />
             <button id="emb-lobby-chat-send-button">Chat</button>
           </div>
         </div>
         <div id="emb-lobby-right-rail">
           <h3 id="emb-lobby-game-name"></h3>
           <div id="emb-lobby-size"></div>
+          <button id="emb-edit-game-button" style="display: none;">Edit Game</button>
           <ul id="emb-lobby-roster"></ul>
           <div class="button-row">
             <button id="emb-start-game-button" style="display: none;">Start Game</button>
@@ -150,6 +153,8 @@ const MARKUP = `
         </div>
         <div id="emb-game-right-rail">
           <h3>Embuscade</h3>
+          <div id="emb-in-game-summary"></div>
+          <div><strong>Time Remaining:</strong><span id="emb-time-remaining" style="float:right"></span></div>
           <ol id="emb-scoreboard"></ol>
           <button id="emb-game-leave-button">Leave Game</button>
         </div>
@@ -176,7 +181,7 @@ const MARKUP = `
           <div id="emb-end-chat-messages" class="chat-messages"></div>
           <div class="chat-input-row">
             <button id="emb-end-who-button">Who</button>
-            <input type="text" id="emb-end-chat-input" placeholder="Say something..." />
+            <input type="text" id="emb-end-chat-input" placeholder="/ Say something" />
             <button id="emb-end-chat-send-button">Chat</button>
           </div>
         </div>
@@ -187,6 +192,7 @@ const MARKUP = `
     <div id="emb-connection-status">
       <span id="emb-connection-dot"></span>
       <span id="emb-connection-text"></span>
+      <span id="emb-voice-chat-icon" title="Voice chat (Right Ctrl to toggle)"></span>
     </div>
 
 
@@ -195,7 +201,7 @@ const MARKUP = `
 function isLikelyMobile() {
     const hasCoarsePointer = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
     const noKeyboardHint = window.matchMedia && window.matchMedia('(hover: none)').matches;
-    const narrowViewport = window.innerWidth < 1280;
+    const narrowViewport = window.innerWidth < 1024;
 
     const pointerSaysMobile = window.matchMedia ? (hasCoarsePointer && noKeyboardHint) : false;
 
@@ -233,6 +239,30 @@ export function mount(container, { wsUrl }) {
 
     const identities = new Map();
 
+    const talkingPlayers = new Set();
+    let lastLobbyRoster = null;
+    let lastWhoModalRoster = null;
+
+    const voiceChat = createVoiceChat({
+        onSignal: (targetPlayerId, signal) => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'voice-signal', targetPlayerId, signal }));
+            }
+        },
+        onLog: (...args) => console.log('[voice]', ...args),
+        onTalkingChange: (talkerPlayerId, isTalking) => {
+            if (isTalking) talkingPlayers.add(talkerPlayerId);
+            else talkingPlayers.delete(talkerPlayerId);
+
+            if (screenStack[screenStack.length - 1] === Screen.Lobby) renderLobbyRosterOnly();
+            if (whoModalOverlay.style.display !== 'none') renderWhoModalListOnly();
+        }
+    });
+
+    function updateVoicePeers(roster) {
+        voiceChat.setPeers(roster.filter((entry) => !entry.isAI).map((entry) => entry.playerId));
+    }
+
     container.innerHTML = `<div class="embuscade">${MARKUP}</div>`;
     const root = container.firstElementChild;
     const $ = (id) => root.querySelector('#emb-' + id);
@@ -251,6 +281,7 @@ export function mount(container, { wsUrl }) {
         disposed = true;
         clearInterval(pingIntervalId);
         clearTimeout(reconnectTimeoutId);
+        voiceChat.teardownAll();
         if (ws) ws.close();
         for (const [target, type, handler] of globalListeners) {
             target.removeEventListener(type, handler);
@@ -293,6 +324,10 @@ export function mount(container, { wsUrl }) {
 
     function makeRosterRow(entry) {
         const li = document.createElement('li');
+        if (entry.awaitingLeave) {
+            li.classList.add('roster-row-pending-leave');
+            li.title = 'Still viewing the end-game results';
+        }
 
         const previewCanvas = document.createElement('canvas');
         previewCanvas.width = SPRITE_SIZE;
@@ -307,6 +342,13 @@ export function mount(container, { wsUrl }) {
 
         li.appendChild(previewCanvas);
         li.appendChild(nameSpan);
+
+        if (talkingPlayers.has(entry.playerId)) {
+            const talkSpan = document.createElement('span');
+            talkSpan.textContent = '🔊';
+            talkSpan.title = 'Talking';
+            li.appendChild(talkSpan);
+        }
 
         if (entry.afk) {
             const afkSpan = document.createElement('span');
@@ -334,31 +376,58 @@ export function mount(container, { wsUrl }) {
         renderAllChatPanels();
     }
 
+    function makeChatSpriteCanvas(identity) {
+        const spriteCanvas = document.createElement('canvas');
+        spriteCanvas.width = SPRITE_SIZE;
+        spriteCanvas.height = SPRITE_SIZE;
+        spriteCanvas.className = 'chat-sprite';
+        spriteCanvas.title = identity.name;
+        const pctx = spriteCanvas.getContext('2d');
+        const rendered = renderSpriteToCanvas(identity.sprite, identity.primaryColor, identity.secondaryColor);
+        pctx.drawImage(rendered, 0, 0);
+        return spriteCanvas;
+    }
+
     function renderChatInto(container) {
         container.innerHTML = '';
         for (const entry of chatMessages) {
             const row = document.createElement('div');
             row.className = 'chat-message-row';
 
-            const spriteCanvas = document.createElement('canvas');
-            spriteCanvas.width = SPRITE_SIZE;
-            spriteCanvas.height = SPRITE_SIZE;
-            spriteCanvas.className = 'chat-sprite';
-            const pctx = spriteCanvas.getContext('2d');
-            const rendered = renderSpriteToCanvas(entry.sprite, entry.primaryColor, entry.secondaryColor);
-            pctx.drawImage(rendered, 0, 0);
+            if (entry.kind === 'kill') {
+                row.classList.add('chat-message-kill');
+                row.appendChild(makeChatSpriteCanvas(entry.killer));
 
-            const nameSpan = document.createElement('span');
-            nameSpan.className = 'chat-name';
-            nameSpan.textContent = entry.name + ':';
+                const killerNameSpan = document.createElement('span');
+                killerNameSpan.className = 'chat-name';
+                killerNameSpan.textContent = entry.killer.name;
+                row.appendChild(killerNameSpan);
 
-            const textSpan = document.createElement('span');
-            textSpan.className = 'chat-text';
-            textSpan.textContent = entry.text;
+                const slewSpan = document.createElement('span');
+                slewSpan.className = 'chat-text';
+                slewSpan.textContent = 'just slew';
+                row.appendChild(slewSpan);
 
-            row.appendChild(spriteCanvas);
-            row.appendChild(nameSpan);
-            row.appendChild(textSpan);
+                row.appendChild(makeChatSpriteCanvas(entry.victim));
+
+                const victimNameSpan = document.createElement('span');
+                victimNameSpan.className = 'chat-name';
+                victimNameSpan.textContent = entry.victim.name;
+                row.appendChild(victimNameSpan);
+            } else {
+                row.appendChild(makeChatSpriteCanvas(entry));
+
+                const nameSpan = document.createElement('span');
+                nameSpan.className = 'chat-name';
+                nameSpan.textContent = entry.name + ':';
+                row.appendChild(nameSpan);
+
+                const textSpan = document.createElement('span');
+                textSpan.className = 'chat-text';
+                textSpan.textContent = entry.text;
+                row.appendChild(textSpan);
+            }
+
             container.appendChild(row);
         }
         container.scrollTop = container.scrollHeight;
@@ -375,11 +444,18 @@ export function mount(container, { wsUrl }) {
     let browserPlayersList = [];
 
     function openWhoModal(players) {
+        lastWhoModalRoster = players;
+        renderWhoModalListOnly();
+        whoModalOverlay.style.display = 'flex';
+    }
+
+    function renderWhoModalListOnly() {
+        if (!lastWhoModalRoster) return;
         whoModalList.innerHTML = '';
-        for (const entry of players) {
+        for (const entry of lastWhoModalRoster) {
+            if (entry.isAI) continue;
             whoModalList.appendChild(makeRosterRow(entry));
         }
-        whoModalOverlay.style.display = 'flex';
     }
 
     function closeWhoModal() {
@@ -391,8 +467,26 @@ export function mount(container, { wsUrl }) {
             if(whoModalOverlay.style.display !== 'none') {
                 closeWhoModal();
             }
-            else if (builderDialogEl.style.display !== 'none') {
-                showBrowserScreen();
+            else if (builder.isVisible()) {
+                popScreen();
+            }
+        }
+        else if (e.code === 'ControlRight') {
+            if (isTextField(e.target)) return;
+            toggleVoiceChat();
+        }
+        else if (e.key === '/') {
+            if (isTextField(e.target)) return;
+            const screen = screenStack[screenStack.length - 1];
+            if (screen === Screen.Lobby) {
+                e.preventDefault();
+                lobbyChatInput.focus();
+            } else if (screen === Screen.EndGame) {
+                e.preventDefault();
+                endChatInput.focus();
+            } else if (screen === Screen.Browser) {
+                e.preventDefault();
+                browserChatInput.focus();
             }
         }
     });
@@ -406,12 +500,12 @@ export function mount(container, { wsUrl }) {
     const loadingEl = $('loading-status');
     const dialogEl = $('join-dialog');
     const browserScreenEl = $('browser-screen');
-    const builderDialogEl = $('builder-dialog');
     const lobbyScreenEl = $('lobby-screen');
     const gameViewEl = $('game-view');
 
     const connectionDotEl = $('connection-dot');
     const connectionTextEl = $('connection-text');
+    const voiceChatIconEl = $('voice-chat-icon');
 
     const nameInput = $('player-name');
     const primaryColorInput = $('primary-color');
@@ -429,26 +523,10 @@ export function mount(container, { wsUrl }) {
     const browserChatSendButton = $('browser-chat-send-button');
     const browserWhoButton = $('browser-who-button');
 
-    const gameNameInput = $('game-name');
-    const gamePasswordInput = $('game-password');
-    const humanCountInput = $('human-count');
-    const aiCountInput = $('ai-count');
-    const humanCountValueEl = $('human-count-value');
-    const aiCountValueEl = $('ai-count-value');
-    const mazeWidthInput = $('maze-width');
-    const mazeLengthInput = $('maze-length');
-    const mazeHeightInput = $('maze-height');
-    const mazeWidthValueEl = $('maze-width-value');
-    const mazeLengthValueEl = $('maze-length-value');
-    const mazeHeightValueEl = $('maze-height-value');
-    const mazeSizeSummaryEl = $('maze-size-summary');
-    const mazeSizeErrorEl = $('maze-size-error');
-    const createGameButton = $('create-game-button');
-    const cancelCreateGameButton = $('builder-cancel-button');
-
     const lobbyGameNameEl = $('lobby-game-name');
     const lobbySizeEl = $('lobby-size');
     const lobbyRosterEl = $('lobby-roster');
+    const editGameButton = $('edit-game-button');
     const startGameButton = $('start-game-button');
     const lobbyLeaveButton = $('lobby-leave-button');
     const lobbyWaitingMessageEl = $('lobby-waiting-message');
@@ -465,13 +543,6 @@ export function mount(container, { wsUrl }) {
     const gameChatHintEl = $('game-chat-hint');
     const gameChatInputRow = $('game-chat-input-row');
 
-    const scoreTargetInput = $('score-target');
-    const scoreTargetValueEl = $('score-target-value');
-    const unlimitedTimeCheckbox = $('unlimited-time-checkbox');
-    const timeLimitRow = $('time-limit-row');
-    const timeLimitInput = $('time-limit');
-    const timeLimitValueEl = $('time-limit-value');
-
     const gameEndOverlay = $('game-end-overlay');
     const gameEndSprite = $('game-end-sprite');
     const gameEndTitle = $('game-end-title');
@@ -482,6 +553,85 @@ export function mount(container, { wsUrl }) {
     const gameEndLeaveButton = $('game-end-leave-button');
 
     const scoreboardEl = $('scoreboard');
+    const inGameSummaryEl = $('in-game-summary')
+    const timeRemainingEl = $('time-remaining')
+
+    const Screen = Object.freeze({
+        Splash: 0,
+        Join: 1,
+        Browser: 2,
+        Builder: 3,
+        Lobby: 4,
+        Game: 5,
+        EndGame: 6,
+    });
+
+    const screenStack = [];
+
+    function showScreen(screen,...parameters) {
+        if(screenStack.length && screenStack.includes(screen)) {
+            let index = screenStack.indexOf(screen);
+            console.log(`Showing screen ${screen}; it's on the stack at ${index}: ${screenStack}`);
+            while(screenStack.length - 1 > index) {
+                screenStack.pop();
+            }
+        }
+        else {
+            screenStack.push(screen);
+        }
+        doScreenDisplay(screen,...parameters);
+    }
+
+    function popScreen(count) {
+        if(count === undefined) count = 1;
+        while (count && screenStack.length) {
+            screenStack.pop();
+            count--;
+        }
+        if(!screenStack.length) screenStack.push(Screen.Splash);
+        doScreenDisplay(screenStack[screenStack.length - 1]);
+    }
+
+    function replaceScreen(screen,...parameters) {
+        if(!screenStack.length) throw('screenStack unexpectedly empty in replaceScreen!');
+        screenStack.pop();
+        showScreen(screen,...parameters);
+    }
+
+    function doScreenDisplay(screen,...parameters) {
+        hideAllScreens();
+        switch(screen) {
+        case Screen.Splash: showSplash(...parameters); break;
+        case Screen.Join: showJoinDialog(...parameters); break;
+        case Screen.Browser: showBrowserScreen(...parameters); break;
+        case Screen.Builder: builderCreateMode = parameters[0]; builder.show(...parameters); break;
+        case Screen.Lobby: showLobbyScreen(...parameters); break;
+        case Screen.Game: showInGameScreen(...parameters); break;
+        case Screen.EndGame: showGameEndOverlay(...parameters); break;
+        }
+        renderVoiceChatIcon();
+    }
+
+    let gameId = undefined;
+    let hostPlayerId = undefined;
+
+    const builderEventSink = {
+        createGame: function(createGame,parameters) {
+            if(createGame) parameters.type = 'create-game';
+            else {
+                parameters.type = 'edit-game';
+                parameters.hostPlayerId = hostPlayerId;
+                parameters.gameId = gameId;
+            }
+            ws.send(JSON.stringify(parameters));
+        },
+        cancelGame: function() {
+            console.log(`er screenStack = ${screenStack}`);
+            popScreen();
+        }
+    }
+
+    const builder = new Builder($,sessionToken,builderEventSink);
 
     whoModalClose.addEventListener('click', closeWhoModal);
     whoModalOverlay.addEventListener('click', (e) => {
@@ -492,27 +642,25 @@ export function mount(container, { wsUrl }) {
         loadingEl.style.display = 'none';
         dialogEl.style.display = 'none';
         browserScreenEl.style.display = 'none';
-        builderDialogEl.style.display = 'none';
         lobbyScreenEl.style.display = 'none';
         gameViewEl.style.display = 'none';
+        gameEndOverlay.style.display = 'none';
         hideSplashScreen();
+        builder.hide();
     }
 
     function showJoinDialog() {
-        hideAllScreens();
         dialogEl.style.display = 'block';
     }
 
     function showSplash() {
-        hideAllScreens();
         showSplashScreen(root, {
-            onJoin: showJoinDialog,
+            onJoin: () => showScreen(Screen.Join),
             onHelp: () => showHelpModal(root)
         });
     }
 
     function showBrowserScreen() {
-        hideAllScreens();
         browserScreenEl.style.display = 'flex';
         renderAllChatPanels();
         if (ws && ws.readyState === WebSocket.OPEN && playerProfile) {
@@ -526,9 +674,51 @@ export function mount(container, { wsUrl }) {
         }
     }
 
+    function showLobbyScreen() {
+        lobbyScreenEl.style.display = 'flex';
+    }
+
+    function showGameEndOverlay() {
+        gameEndOverlay.style.display = 'flex';
+    }
+
+    function showInGameScreen() {
+        gameViewEl.style.display = 'flex';
+    }
+
     function setConnectionStatus(connected) {
         connectionDotEl.classList.toggle('disconnected', !connected);
         connectionTextEl.textContent = connected ? '' : 'client disconnected';
+    }
+
+    // --- Discussion vocale (bascule, persistance, et le mesh WebRTC lui-même) ---
+
+    const VOICE_CHAT_SCREENS = new Set([Screen.Lobby, Screen.Game, Screen.EndGame]);
+    let voiceChatEnabled = localStorage.getItem(VOICE_CHAT_STORAGE_KEY) !== 'false';
+    let builderCreateMode = true;
+
+    function isVoiceChatAvailable() {
+        const screen = screenStack[screenStack.length - 1];
+        if (screen === Screen.Builder) return !builderCreateMode;
+        return VOICE_CHAT_SCREENS.has(screen);
+    }
+
+    function renderVoiceChatIcon() {
+        const active = isVoiceChatAvailable() && voiceChatEnabled;
+        voiceChatIconEl.style.display = 'inline';
+        voiceChatIconEl.textContent = active ? '🔊' : '🔇';
+        voiceChat.setLocalEnabled(active);
+    }
+
+    function setVoiceChatEnabled(enabled) {
+        voiceChatEnabled = enabled;
+        localStorage.setItem(VOICE_CHAT_STORAGE_KEY, String(enabled));
+        renderVoiceChatIcon();
+    }
+
+    function toggleVoiceChat() {
+        if (!isVoiceChatAvailable()) return;
+        setVoiceChatEnabled(!voiceChatEnabled);
     }
 
     // --- Écran: profil ---
@@ -639,12 +829,42 @@ export function mount(container, { wsUrl }) {
         saveProfile({ name, primaryColor, secondaryColor, preset: selectedPreset });
         playerProfile = { name, primaryColor, secondaryColor, sprite };
 
-        showBrowserScreen();
+        replaceScreen(Screen.Browser);
     });
     joinCancelButton.addEventListener('click', () => {
-        hideAllScreens()
-        showSplash();
+        popScreen();
     });
+
+    function updateTimeRemaining(msg) {
+        if(msg.timeRemaining !== undefined) {
+            var ms = msg.timeRemaining;
+            if(ms < 0) ms = 0;
+            var s = Math.floor(ms / 1000);
+            ms -= s * 1000;
+            ms = Math.floor(ms);
+            var m = Math.floor(s / 60);
+            s -= m * 60;
+            timeRemainingEl.textContent = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
+            console.log(`${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(ms).padStart(3, '0')}`);
+        }
+        else {
+            timeRemainingEl.textContent = '♾️';
+        }
+    }
+
+    function updateInGameSummary(msg) {
+        const game = msg.game;
+        const maze = msg.maze;
+        inGameSummaryEl.replaceChildren();
+        const isPrivate = game.isPrivate ? ' 🔒' : '';
+        const titleElement = document.createElement('h3');
+        titleElement.textContent = `${game.name}${isPrivate}`;
+        inGameSummaryEl.append(titleElement);
+        const sizeElement = document.createElement('span');
+        sizeElement.textContent = `${maze.largeur} x ${maze.longeur} x ${maze.hauteur}`;
+        inGameSummaryEl.append(sizeElement);
+        updateTimeRemaining(game);
+    }
 
     // --- Connexion WebSocket ---
     let endGamePlayersList = [];
@@ -668,9 +888,12 @@ export function mount(container, { wsUrl }) {
         ws.addEventListener('message', (event) => {
             if (disposed) return;
             const msg = JSON.parse(event.data);
+            console.log(`got a message ${msg.type}`);
 
             if (msg.type === 'resumed') {
                 playerId = msg.playerId;
+                voiceChat.setSelfId(playerId);
+                updateVoicePeers(msg.roster);
 
                 const savedProfile = loadSavedProfile();
                 if (savedProfile) {
@@ -696,20 +919,27 @@ export function mount(container, { wsUrl }) {
                     };
                     maze = msg.maze.cells;
 
-                    hideAllScreens();
-                    gameViewEl.style.display = 'flex';
+                    showScreen(Screen.Game);
+                    updateInGameSummary(msg);
                     setupInputHandling();
                     hideGameChatInput();
                     drawScene();
                 } else {
-                    hideAllScreens();
-                    lobbyScreenEl.style.display = 'flex';
+                    showScreen(Screen.Lobby);
                     renderLobby(msg);
                 }
             } else if (msg.type === 'resume-failed') {
                 localStorage.removeItem(SESSION_TOKEN_KEY);
-                hideAllScreens();
-                showSplash();
+                playerId = null;
+                voiceChat.setSelfId(null);
+                voiceChat.teardownAll();
+                tanks = [];
+                shots = [];
+                maze = null;
+                clearChat();
+                // a resume can land straight in Lobby/Game with no Splash below it, so patching via showScreen() isn't enough -- reset outright.
+                screenStack.length = 0;
+                showScreen(Screen.Splash);
             } else if (msg.type === 'games-list') {
                 renderGamesList(msg.games);
             } else if (msg.type === 'browser-players') {
@@ -717,24 +947,41 @@ export function mount(container, { wsUrl }) {
             } else if (msg.type === 'chat-message') {
                 appendChatMessage(msg);
             } else if (msg.type === 'join-rejected') {
-                alert(msg.reason === 'bad-password' ? 'Incorrect password.' : 'That game is full.');
+                if (msg.reason === 'bad-password') {
+                    alert('Incorrect password.');
+                } else if (msg.reason === 'started') {
+                    alert('Game is underway; you can only join games that are not under way.');
+                } else {
+                    alert('That game is full.');
+                }
             } else if (msg.type === 'lobby-joined') {
                 playerId = msg.playerId;
+                voiceChat.setSelfId(playerId);
                 registerIdentity({ playerId, ...playerProfile });
                 clearChat();
 
-                hideAllScreens();
-                lobbyScreenEl.style.display = 'flex';
+                replaceScreen(Screen.Lobby);
             } else if (msg.type === 'lobby-state') {
+                updateVoicePeers(msg.roster);
                 renderLobby(msg);
+            } else if (msg.type === 'roster-update') {
+                updateVoicePeers(msg.roster);
+            } else if (msg.type === 'voice-signal') {
+                voiceChat.handleSignal(msg.fromPlayerId, msg.signal);
             } else if (msg.type === 'left-game') {
                 playerId = null;
+                voiceChat.setSelfId(null);
+                voiceChat.teardownAll();
                 tanks = [];
                 shots = [];
                 maze = null;
                 clearChat();
-                gameEndOverlay.style.display = 'none';
-                showBrowserScreen();
+                popScreen();
+            } else if (msg.type === 'reverted-to-lobby') {
+                tanks = [];
+                shots = [];
+                maze = null;
+                popScreen();
             } else if (msg.type === 'game-started') {
                 mazeConfig = {
                     largeur: msg.maze.largeur,
@@ -747,9 +994,10 @@ export function mount(container, { wsUrl }) {
                 for (const entry of msg.roster) {
                     if (!identities.has(entry.playerId)) registerIdentity(entry);
                 }
+                updateVoicePeers(msg.roster);
 
-                hideAllScreens();
-                gameViewEl.style.display = 'flex';
+                showScreen(Screen.Game);
+                updateInGameSummary(msg);
                 setupInputHandling();
                 renderAllChatPanels();
                 hideGameChatInput();
@@ -766,13 +1014,14 @@ export function mount(container, { wsUrl }) {
                     }
                 }
 
+                updateTimeRemaining(msg);
                 drawScene();
             } else if (msg.type === 'game-ended') {
                 endGamePlayersList = msg.scores;
                 const winnerCanvas = renderSpriteToCanvas(msg.winner.sprite, msg.winner.primaryColor, msg.winner.secondaryColor);
                 gameEndSprite.getContext('2d').drawImage(winnerCanvas, 0, 0);
                 gameEndTitle.textContent = `${msg.winner.name} Wins!`;
-                gameEndOverlay.style.display = 'flex';
+                replaceScreen(Screen.EndGame);
                 renderAllChatPanels();
             } else if (msg.type === 'left-game') {
                 playerId = null;
@@ -780,8 +1029,7 @@ export function mount(container, { wsUrl }) {
                 shots = [];
                 maze = null;
                 clearChat();
-                gameEndOverlay.style.display = 'none';
-                showBrowserScreen();
+                popScreen(2);
             }
 
         });
@@ -819,7 +1067,8 @@ export function mount(container, { wsUrl }) {
             info.textContent = `${game.name} -- ${game.width}x${game.length}x${game.height} -- `
                 + `${game.playerCount}/${game.humanSlots} players`
                 + (game.aiSlots > 0 ? ` + ${game.aiSlots} AI` : '')
-                + ` -- ${game.preview}`;
+                + ` -- ${game.preview}`
+                + (game.started ? ' -- underway' : '');
             if (game.hasPassword) {
                 const lockTag = document.createElement('span');
                 lockTag.textContent = ' 🔒';
@@ -828,7 +1077,7 @@ export function mount(container, { wsUrl }) {
 
             const joinBtn = document.createElement('button');
             joinBtn.textContent = 'Join';
-            joinBtn.disabled = game.playerCount >= game.humanSlots;
+            joinBtn.disabled = game.started || game.playerCount >= game.humanSlots;
             joinBtn.addEventListener('click', () => {
                 let password = null;
                 if (game.hasPassword) {
@@ -853,13 +1102,11 @@ export function mount(container, { wsUrl }) {
     }
 
     browserCreateButton.addEventListener('click', () => {
-        hideAllScreens();
-        builderDialogEl.style.display = 'block';
+        showScreen(Screen.Builder,true,playerProfile);
     });
 
     browserLeaveButton.addEventListener('click', () => {
-        hideAllScreens();
-        showSplash();
+        popScreen();
     });
 
     browserChatSendButton.addEventListener('click', () => {
@@ -891,126 +1138,22 @@ export function mount(container, { wsUrl }) {
         openWhoModal(endGamePlayersList);
     });
     gameEndLeaveButton.addEventListener('click', () => {
-        ws.send(JSON.stringify({ type: 'leave-game' }));
+        ws.send(JSON.stringify({ type: 'revert-to-lobby' }));
     });
-
-    // --- Écran: créer une partie ---
-
-    function currentTotalPlayers() {
-        return parseInt(humanCountInput.value, 10) + parseInt(aiCountInput.value, 10);
-    }
-
-    function updateCreateButtonState() {
-        const width = parseInt(mazeWidthInput.value, 10);
-        const length = parseInt(mazeLengthInput.value, 10);
-        const height = parseInt(mazeHeightInput.value, 10);
-        const actualCells = width * length * height;
-        const total = currentTotalPlayers();
-        const tooCramped = actualCells < total;
-        const nameEmpty = gameNameInput.value.trim().length === 0;
-
-        createGameButton.disabled = tooCramped || nameEmpty;
-    }
-
-    function updateMazeSizeSummary() {
-        const total = currentTotalPlayers();
-        const recommendedCells = Math.floor(total * CELLS_PER_PLAYER);
-
-        const width = parseInt(mazeWidthInput.value, 10);
-        const length = parseInt(mazeLengthInput.value, 10);
-        const height = parseInt(mazeHeightInput.value, 10);
-        const actualCells = width * length * height;
-
-        mazeWidthValueEl.textContent = width;
-        mazeLengthValueEl.textContent = length;
-        mazeHeightValueEl.textContent = height;
-
-        mazeSizeSummaryEl.textContent =
-            `Maze size: ${width} x ${length} x ${height} = ${actualCells} cells. ` +
-            `Recommended size is ${recommendedCells} cells (~${CELLS_PER_PLAYER}/player) for ${total} player${total === 1 ? '' : 's'}.`;
-
-        const tooCramped = actualCells < total;
-        if (tooCramped) {
-            mazeSizeErrorEl.textContent =
-                `Too cramped: ${actualCells} cells for ${total} players is below the 1 cell/player minimum. Increase maze size or reduce player count.`;
-            mazeSizeErrorEl.style.display = 'block';
-        } else {
-            mazeSizeErrorEl.style.display = 'none';
-        }
-
-        updateCreateButtonState();
-    }
-
-    humanCountInput.addEventListener('input', () => {
-        humanCountValueEl.textContent = humanCountInput.value;
-        if (currentTotalPlayers() > 16) {
-            aiCountInput.value = Math.max(0, 16 - parseInt(humanCountInput.value, 10));
-            aiCountValueEl.textContent = aiCountInput.value;
-        }
-        updateMazeSizeSummary();
-    });
-
-    aiCountInput.addEventListener('input', () => {
-        aiCountValueEl.textContent = aiCountInput.value;
-        if (currentTotalPlayers() > 16) {
-            humanCountInput.value = Math.max(1, 16 - parseInt(aiCountInput.value, 10));
-            humanCountValueEl.textContent = humanCountInput.value;
-        }
-        updateMazeSizeSummary();
-    });
-
-    mazeWidthInput.addEventListener('input', updateMazeSizeSummary);
-    mazeLengthInput.addEventListener('input', updateMazeSizeSummary);
-    mazeHeightInput.addEventListener('input', updateMazeSizeSummary);
-    gameNameInput.addEventListener('input', updateCreateButtonState);
-
-    scoreTargetInput.addEventListener('input', () => {
-        scoreTargetValueEl.textContent = scoreTargetInput.value;
-    });
-
-    unlimitedTimeCheckbox.addEventListener('change', () => {
-        timeLimitRow.style.display = unlimitedTimeCheckbox.checked ? 'none' : 'flex';
-    });
-
-    timeLimitInput.addEventListener('input', () => {
-        timeLimitValueEl.textContent = timeLimitInput.value;
-    });
-
-    createGameButton.addEventListener('click', () => {
-        ws.send(JSON.stringify({
-            type: 'create-game',
-            name: gameNameInput.value.trim() || 'Untitled Game',
-            password: gamePasswordInput.value || null,
-            humanCount: parseInt(humanCountInput.value, 10),
-            aiCount: parseInt(aiCountInput.value, 10),
-            width: parseInt(mazeWidthInput.value, 10),
-            length: parseInt(mazeLengthInput.value, 10),
-            height: parseInt(mazeHeightInput.value, 10),
-            sessionToken,
-            playerName: playerProfile.name,
-            primaryColor: playerProfile.primaryColor,
-            secondaryColor: playerProfile.secondaryColor,
-            sprite: playerProfile.sprite,
-            scoreTarget: parseInt(scoreTargetInput.value, 10),
-            timeLimitMs: unlimitedTimeCheckbox.checked ? null : parseInt(timeLimitInput.value, 10),
-        }));
-    });
-
-    cancelCreateGameButton.addEventListener('click', () => {
-        showBrowserScreen();
-    });
-
-    updateMazeSizeSummary();
 
     // --- Écran: lobby (salle d'attente avant démarrage) ---
 
     function renderLobby(msg) {
+        // TODO il faut avoir le concept "currentGame"
+        gameId = msg.gameId;
+        hostPlayerId = msg.hostPlayerId;
         lobbyGameNameEl.textContent = msg.name;
         if (msg.hasPassword) {
             lobbyGameNameEl.textContent += ' 🔒';
         }
         lobbySizeEl.textContent = `${msg.width} x ${msg.length} x ${msg.height} -- ${msg.humanSlots} human, ${msg.aiSlots} AI -- ${msg.preview}`;
 
+        lastLobbyRoster = msg.roster;
         lobbyRosterEl.innerHTML = '';
         for (const entry of msg.roster) {
             if (!identities.has(entry.playerId)) {
@@ -1023,14 +1166,33 @@ export function mount(container, { wsUrl }) {
             }
         }
 
+        const anyoneStillLeaving = msg.roster.some((entry) => entry.awaitingLeave);
+
         startGameButton.style.display = isHost ? 'inline-block' : 'none';
+        startGameButton.disabled = anyoneStillLeaving;
+        startGameButton.title = anyoneStillLeaving
+            ? 'Waiting for all players to leave the end-game screen'
+            : '';
+        editGameButton.style.display = isHost ? 'inline-block' : 'none';
         lobbyWaitingMessageEl.style.display = isHost ? 'none' : 'block';
 
         renderAllChatPanels();
     }
 
+    function renderLobbyRosterOnly() {
+        if (!lastLobbyRoster) return;
+        lobbyRosterEl.innerHTML = '';
+        for (const entry of lastLobbyRoster) {
+            lobbyRosterEl.appendChild(makeRosterRow(entry));
+        }
+    }
+
     startGameButton.addEventListener('click', () => {
         ws.send(JSON.stringify({ type: 'start-game' }));
+    });
+
+    editGameButton.addEventListener('click', () => {
+        showScreen(Screen.Builder,false,playerProfile);
     });
 
     lobbyLeaveButton.addEventListener('click', () => {
@@ -1487,6 +1649,12 @@ export function mount(container, { wsUrl }) {
 
             li.appendChild(spriteCanvas);
             li.appendChild(nameSpan);
+            if (talkingPlayers.has(tank.playerId)) {
+                const talkSpan = document.createElement('span');
+                talkSpan.textContent = '🔊';
+                talkSpan.title = 'Talking';
+                li.appendChild(talkSpan);
+            }
             li.appendChild(scoreSpan);
             scoreboardEl.appendChild(li);
         }

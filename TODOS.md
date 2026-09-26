@@ -8,7 +8,8 @@ Good — here's the full list as it stands, reordered per tonight's adjustments:
 5. AI players
 7. Sound effects
 6. Power-ups
-4. Voice chat — push-to-talk (left-shift default), mesh WebRTC, signaled over the existing WebSocket
+4. ~~Voice chat~~ — done: open-mic toggle (Right Ctrl, not push-to-talk), mesh WebRTC signaled over the existing WebSocket, available in Lobby/Game/EndGame/Builder-edit, muted state persists in localStorage across games. No TURN server, so voice may fail to connect across strict/symmetric NATs.
+5. Show scores in end game dialog right rail, make chat area larger.  remove ai players from who
 8. Keybinding customization
 9. High-DPI canvas fix (`devicePixelRatio` scaling — currently blurry on retina/high-res displays)
 10. Sprite scale-up — reconsider `SPRITE_SIZE` and/or grid resolution (32×32 → 64×64) now that cells are 256px; look at it rendered first before deciding

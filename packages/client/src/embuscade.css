@@ -89,6 +89,13 @@
 .embuscade .chat-message-row .chat-text {
   word-break: break-word;
 }
+.embuscade .chat-message-kill {
+  align-items: center;
+}
+.embuscade .chat-message-kill .chat-text {
+  font-style: italic;
+  color: #aaa;
+}
 .embuscade .chat-input-row {
   display: flex;
   gap: 8px;
@@ -192,6 +199,7 @@
 .embuscade #emb-lobby-roster { list-style: none; padding: 0; margin: 0 0 12px 0; }
 .embuscade #emb-lobby-roster li { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
 .embuscade .roster-sprite { width: 24px; height: 24px; image-rendering: pixelated; }
+.embuscade .roster-row-pending-leave { opacity: 0.4; filter: grayscale(1); }
 .embuscade #emb-lobby-waiting-message { color: #aaa; font-size: 13px; }
 
 .embuscade #emb-game-view-inner { display: flex; flex-direction: column; }
@@ -224,6 +232,7 @@
 .embuscade #emb-connection-dot { width: 10px; height: 10px; border-radius: 50%; background: #0f0; }
 .embuscade #emb-connection-dot.disconnected { background: #f00; animation: emb-connection-blink 1s step-start infinite; }
 @keyframes emb-connection-blink { 50% { opacity: 0.2; } }
+.embuscade #emb-voice-chat-icon { font-size: 14px; line-height: 1; }
 .embuscade #emb-who-modal-overlay {
   position: absolute;
   inset: 0;

@@ -3,6 +3,8 @@ import Wilson from '@bolo/shared/Wilson.js';
 import { Direction } from '@bolo/shared/Direction.js';
 import { getVerticalIcons } from '@bolo/shared/MazeGeometry.js';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { assignAIIdentities, updateAITank } from './ai.js';
 
 const TANK_RADIUS = 14;
@@ -31,6 +33,20 @@ const DEFAULT_SCORE_TARGET = 10;
 const POWERUP_MAX_COUNT_MATCHES_PLAYERS = true; // aussi de puissants qu'il y a de joueurs, comme spécifié
 const POWERUP_SPAWN_INTERVAL_MS = 7500;
 const POWERUP_RESPAWN_DELAY_MS = 5000;
+const AI_TAUNT_CHANCE = 0.2;
+
+function loadAiTaunts() {
+    try {
+        const path = fileURLToPath(new URL('../../../AI-taunts.json', import.meta.url));
+        const taunts = JSON.parse(readFileSync(path, 'utf8'));
+        return Array.isArray(taunts) ? taunts.filter((t) => typeof t === 'string') : [];
+    } catch (err) {
+        console.warn('could not load AI-taunts.json:', err.message);
+        return [];
+    }
+}
+
+const AI_TAUNTS = loadAiTaunts();
 
 let nextPowerUpId = 1;
 
@@ -66,13 +82,13 @@ function gameSummary(game) {
         aiSlots: game.aiSlots,
         playerCount: game.tanks.size,
         hasPassword: !!game.password,
+        started: game.started,
         preview: formatGamePreview(game)
     };
 }
 
 function broadcastGamesList() {
     const list = Array.from(games.values())
-        .filter(g => !g.started)
         .map(gameSummary);
     const message = JSON.stringify({ type: 'games-list', games: list });
 
@@ -98,7 +114,9 @@ function buildRoster(game) {
         secondaryColor: t.secondaryColor,
         sprite: t.sprite,
         isHost: t.playerId === game.hostPlayerId,
-        afk: isAfk(t,game.started)
+        isAI: !!t.isAI,
+        afk: isAfk(t,game.started),
+        awaitingLeave: !!t.awaitingLeave
     }));
 }
 
@@ -485,6 +503,7 @@ function broadcastGameState(game) {
     for (const recipient of tankList) {
         if (!recipient.ws || recipient.ws.readyState !== recipient.ws.OPEN) continue;
 
+        const now = Date.now();
         const message = JSON.stringify({
             type: 'state',
             tanks: tankList
@@ -518,6 +537,7 @@ function broadcastGameState(game) {
             shots: shotsPayload,
             sfx: game.sfxEvents,
             powerUps: powerUpsPayload,
+            timeRemaining: game.timeLimitMs ? game.startedAt + game.timeLimitMs - now : undefined
         });
 
         recipient.ws.send(message);
@@ -540,6 +560,18 @@ function broadcastLobbyState(game) {
         roster: buildRoster(game),
         preview: formatGamePreview(game),
     });
+
+    for (const tank of game.tanks.values()) {
+        if (!tank.ws || tank.ws.readyState !== tank.ws.OPEN) continue;
+        tank.ws.send(message);
+    }
+}
+
+// Mid-game membership changes (someone leaves/disconnects after the round
+// started) don't get a lobby-state broadcast, but voice-chat peer discovery
+// still needs to hear about them -- this is that minimal notification.
+function broadcastRosterUpdate(game) {
+    const message = JSON.stringify({ type: 'roster-update', roster: buildRoster(game) });
 
     for (const tank of game.tanks.values()) {
         if (!tank.ws || tank.ws.readyState !== tank.ws.OPEN) continue;
@@ -606,6 +638,14 @@ function startGame(game) {
         tank.ws.send(JSON.stringify({
             type: 'game-started',
             maze: { largeur: game.width, longeur: game.length, hauteur: game.height, cellSize: game.cellSize, cells: game.maze },
+            game: {
+                name: game.name,
+                isPrivate: game.password ? true : false,
+                humanCount: game.humanCount,
+                aiCount: game.aiCount,
+                scoreTarget: game.scoreTarget, 
+                timeRemaining: game.timeLimitMs
+            },
             roster: buildRoster(game)
         }));
     }
@@ -636,9 +676,49 @@ function purgeTank(game, playerId) {
             const nextHost = remainingHumans[0];
             game.hostPlayerId = nextHost.playerId;
         }
-        if (!game.started) broadcastLobbyState(game);
+
+        const stillWaiting = remainingHumans.some((t) => t.awaitingLeave);
+        if (game.started && !stillWaiting && game.ended) {
+            resetGameForLobby(game);
+            broadcastLobbyState(game);
+        } else if (!game.started) {
+            broadcastLobbyState(game);
+        } else {
+            broadcastRosterUpdate(game);
+        }
     }
     broadcastGamesList();
+}
+
+function resetGameForLobby(game) {
+    for (const tank of Array.from(game.tanks.values())) {
+        if (tank.isAI) game.tanks.delete(tank.playerId);
+    }
+
+    game.started = false;
+    game.ended = false;
+    game.startedAt = null;
+    game.shots.clear();
+    game.powerUps = [];
+    game.sfxEvents = [];
+
+    for (const tank of game.tanks.values()) {
+        tank.dead = false;
+        tank.deathTime = null;
+        tank.score = 0;
+        tank.lastScoreTime = null;
+        tank.health = 100;
+        tank.maxHealth = 100;
+        tank.x = 0; tank.y = 0; tank.z = 0; tank.heading = 0; tank.speed = 0;
+        tank.transitioning = false;
+        tank.transitionFromZ = null;
+        tank.transitionToZ = null;
+        tank.transitionStartTime = null;
+        tank.verticalCooldown = null;
+        tank.lastFireTime = null;
+        tank.awaitingLeave = false;
+        tank.input = { turnLeft: false, turnRight: false, throttleUp: false, throttleDown: false };
+    }
 }
 
 function promoteNextHost(game, departingHostId) {
@@ -796,6 +876,13 @@ function checkDeaths(game) {
         if (killer && !killer.dead && killer.playerId !== tank.playerId) {
             killer.score += 1;
             killer.lastScoreTime = Date.now();
+
+            broadcastKillAnnouncement(game, killer, tank);
+
+            if (killer.isAI && AI_TAUNTS.length > 0 && Math.random() < AI_TAUNT_CHANCE) {
+                const taunt = AI_TAUNTS[Math.floor(Math.random() * AI_TAUNTS.length)];
+                broadcastGameChat(game, killer, taunt);
+            }
         }
     }
 }
@@ -853,6 +940,9 @@ function checkGameEnd(game) {
     }
 
     game.ended = true;
+    for (const tank of tankList) {
+        if (!tank.isAI) tank.awaitingLeave = true;
+    }
 
     const message = JSON.stringify({
         type: 'game-ended',
@@ -866,6 +956,7 @@ function checkGameEnd(game) {
         scores: tankList.map(t => ({
             playerId: t.playerId,
             name: t.name,
+            isAI: t.isAI,
             primaryColor: t.primaryColor,
             secondaryColor: t.secondaryColor,
             sprite: t.sprite,
@@ -945,6 +1036,24 @@ function broadcastGameChat(game, tank, text) {
     }
 }
 
+function tankIdentity(tank) {
+    return { name: tank.name, primaryColor: tank.primaryColor, secondaryColor: tank.secondaryColor, sprite: tank.sprite };
+}
+
+function broadcastKillAnnouncement(game, killer, victim) {
+    const message = JSON.stringify({
+        type: 'chat-message',
+        kind: 'kill',
+        killer: tankIdentity(killer),
+        victim: tankIdentity(victim),
+        timestamp: Date.now()
+    });
+
+    for (const t of game.tanks.values()) {
+        if (t.ws && t.ws.readyState === t.ws.OPEN) t.ws.send(message);
+    }
+}
+
 const wss = new WebSocketServer({ port: PORT });
 
 wss.on('connection', (ws) => {
@@ -954,7 +1063,7 @@ wss.on('connection', (ws) => {
     browserSockets.add(ws);
     ws.send(JSON.stringify({
         type: 'games-list',
-        games: Array.from(games.values()).filter(g => !g.started).map(gameSummary)
+        games: Array.from(games.values()).map(gameSummary)
     }));
     ws.send(JSON.stringify({
         type: 'browser-players',
@@ -968,6 +1077,7 @@ wss.on('connection', (ws) => {
         } catch {
             return;
         }
+        console.log(`got a message ${msg.type}`);
 
         if (msg.type === 'browse') {
             browserIdentities.set(ws, {
@@ -1023,6 +1133,7 @@ wss.on('connection', (ws) => {
                 gameId: game.id,
                 started: game.started,
                 name: game.name,
+                private: game.password ? true : false,
                 width: game.width,
                 length: game.length,
                 height: game.height,
@@ -1058,7 +1169,69 @@ wss.on('connection', (ws) => {
             });
 
             currentGame = game;
-            const playerId = game.nextLocalPlayerId++;
+            const playerId = (assignedPlayerId != undefined) ? assignedPlayerId : game.nextLocalPlayerId++;
+            assignedPlayerId = playerId;
+            game.hostPlayerId = playerId;
+
+            const tank = {
+                playerId,
+                ws,
+                sessionToken: msg.sessionToken,
+                name: String(msg.playerName ?? 'Player').slice(0, 20),
+                primaryColor: msg.primaryColor,
+                secondaryColor: msg.secondaryColor,
+                sprite: msg.sprite,
+                dead: false,
+                deathTime: null,
+                x: 0, y: 0, z: 0, heading: 0, speed: 0, health: 100, maxHealth: 100,
+                transitioning: false, transitionFromZ: null, transitionToZ: null,
+                transitionStartTime: null, verticalCooldown: null,
+                lastActivityTime: Date.now(), tabHidden: false, disconnected: false,
+                disconnectTimeout: null, hostGraceTimeout: null, wasHostAtDisconnect: false,
+                lastFireTime: null,
+                score: 0,
+                lastScoreTime: null,
+                input: { turnLeft: false, turnRight: false, throttleUp: false, throttleDown: false }
+            };
+
+            game.tanks.set(playerId, tank);
+            if (msg.sessionToken) sessionTokens.set(msg.sessionToken, { gameId: game.id, playerId });
+            browserSockets.delete(ws);
+            browserIdentities.delete(ws);
+            broadcastBrowserPlayers();
+
+            ws.send(JSON.stringify({ type: 'lobby-joined', gameId: game.id, playerId }));
+            broadcastLobbyState(game);
+            broadcastGamesList();
+            return;
+        }
+
+        if (msg.type === 'edit-game') {
+            console.log(`got an edit-game ${currentGame !== undefined}`);
+            if (!currentGame) return;
+
+            const width = Math.max(2, Math.min(10, parseInt(msg.width, 10) || 10));
+            const length = Math.max(2, Math.min(10, parseInt(msg.length, 10) || 10));
+            const height = Math.max(1, Math.min(10, parseInt(msg.height, 10) || 1));
+            const humanCount = Math.max(1, Math.min(MAX_TOTAL_PLAYERS, parseInt(msg.humanCount, 10) || 1));
+            const aiCount = Math.max(0, Math.min(MAX_TOTAL_PLAYERS - humanCount, parseInt(msg.aiCount, 10) || 0));
+            const scoreTarget = Math.max(1, Math.min(100, parseInt(msg.scoreTarget, 10) || DEFAULT_SCORE_TARGET));
+            const timeLimitMs = msg.timeLimitMs ? Math.max(2, Math.min(60, parseInt(msg.timeLimitMs, 10))) * 60000 : null;
+
+            if(msg.gameId === undefined) throw 'msg.gameId is undefined!';
+
+            // delete / recreate the game
+            games.delete(msg.gameId);
+            const game = createGame({
+                name: String(msg.name ?? 'Untitled Game').slice(0, 120),
+                password: msg.password ? hashPassword(msg.password) : null,
+                width, length, height,
+                humanCount, aiCount,
+                scoreTarget, timeLimitMs
+            });
+
+            currentGame = game;
+            const playerId = msg.hostPlayerId;
             assignedPlayerId = playerId;
             game.hostPlayerId = playerId;
 
@@ -1099,7 +1272,11 @@ wss.on('connection', (ws) => {
             if (currentGame) return;
 
             const game = games.get(msg.gameId);
-            if (!game || game.started) return;
+            if (!game) return;
+            if (game.started) {
+                ws.send(JSON.stringify({ type: 'join-rejected', reason: 'started' }));
+                return;
+            }
             if (game.password && game.password !== hashPassword(msg.password || '')) {
                 ws.send(JSON.stringify({ type: 'join-rejected', reason: 'bad-password' }));
                 return;
@@ -1147,6 +1324,7 @@ wss.on('connection', (ws) => {
         }
 
         if (msg.type === 'start-game') {
+            console.log(`currentGame = ${currentGame !== undefined} ${assignedPlayerId} ${currentGame ? currentGame.hostPlayerId : 'unknown'}`);
             if (!currentGame || assignedPlayerId !== currentGame.hostPlayerId) return;
             if (currentGame.started) return;
 
@@ -1169,7 +1347,39 @@ wss.on('connection', (ws) => {
             ws.send(JSON.stringify({ type: 'left-game' }));
             ws.send(JSON.stringify({
                 type: 'games-list',
-                games: Array.from(games.values()).filter(g => !g.started).map(gameSummary)
+                games: Array.from(games.values()).map(gameSummary)
+            }));
+            return;
+        }
+
+        if (msg.type === 'revert-to-lobby') {
+            if (!currentGame || assignedPlayerId === null) return;
+
+            const game = currentGame;
+            const tank = game.tanks.get(assignedPlayerId);
+            if (tank) tank.awaitingLeave = false;
+
+            const stillWaiting = Array.from(game.tanks.values()).some((t) => !t.isAI && t.awaitingLeave);
+            if (game.started && game.ended && !stillWaiting) {
+                resetGameForLobby(game);
+                broadcastGamesList();
+            }
+
+            ws.send(JSON.stringify({ type: 'reverted-to-lobby' }));
+            broadcastLobbyState(game);
+            return;
+        }
+
+        if (msg.type === 'voice-signal') {
+            if (!currentGame || assignedPlayerId === null) return;
+
+            const targetTank = currentGame.tanks.get(msg.targetPlayerId);
+            if (!targetTank || !targetTank.ws || targetTank.ws.readyState !== targetTank.ws.OPEN) return;
+
+            targetTank.ws.send(JSON.stringify({
+                type: 'voice-signal',
+                fromPlayerId: assignedPlayerId,
+                signal: msg.signal
             }));
             return;
         }
