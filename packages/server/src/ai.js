@@ -72,12 +72,16 @@ function getOpenNeighbors(game, z, cellY, cellX) {
     const cell = game.maze[z][cellY][cellX];
     const neighbors = [];
 
-    if (cell & Direction.North) neighbors.push({ z, cellY: cellY - 1, cellX });
-    if (cell & Direction.South) neighbors.push({ z, cellY: cellY + 1, cellX });
-    if (cell & Direction.East) neighbors.push({ z, cellY, cellX: cellX + 1 });
-    if (cell & Direction.West) neighbors.push({ z, cellY, cellX: cellX - 1 });
-    if (cell & Direction.Up) neighbors.push({ z: z - 1, cellY, cellX });
-    if (cell & Direction.Down) neighbors.push({ z: z + 1, cellY, cellX });
+    // Bounds-check every direction: a boundary cell's open-wall bits should
+    // never point off the edge of the maze, but a crash here takes down the
+    // whole server rather than just this one AI's pathfinding step, so this
+    // doesn't trust that invariant.
+    if (cell & Direction.North && cellY - 1 >= 0) neighbors.push({ z, cellY: cellY - 1, cellX });
+    if (cell & Direction.South && cellY + 1 < game.length) neighbors.push({ z, cellY: cellY + 1, cellX });
+    if (cell & Direction.East && cellX + 1 < game.width) neighbors.push({ z, cellY, cellX: cellX + 1 });
+    if (cell & Direction.West && cellX - 1 >= 0) neighbors.push({ z, cellY, cellX: cellX - 1 });
+    if (cell & Direction.Up && z - 1 >= 0) neighbors.push({ z: z - 1, cellY, cellX });
+    if (cell & Direction.Down && z + 1 < game.height) neighbors.push({ z: z + 1, cellY, cellX });
 
     return neighbors;
 }
@@ -137,6 +141,13 @@ function steerToward(tank, targetX, targetY, dt) {
         if (diff > 0) tank.input.turnRight = true;
         else tank.input.turnLeft = true;
     }
+}
+
+function stopMoving(tank) {
+    tank.input.turnLeft = false;
+    tank.input.turnRight = false;
+    tank.input.throttleUp = false;
+    tank.input.throttleDown = false;
 }
 
 function findVisibleTarget(game, tank) {
@@ -202,7 +213,11 @@ export function updateAITank(game, tank, dt, trySpawnShot, computeDistances) {
             const center = cellCenter(game, bestNeighbor.cellX, bestNeighbor.cellY);
             steerToward(tank, center.x, center.y, dt);
         } else {
-            steerToward(tank, target.x, target.y, dt);
+            // No pathfinding step found this tick -- steering straight at the
+            // target's raw position would ignore walls entirely and could
+            // ram one repeatedly (self-inflicted, uncredited death). Hold
+            // still; distances get recomputed fresh next tick.
+            stopMoving(tank);
         }
 
         fireIfAligned(game, tank, target.x, target.y, trySpawnShot);
@@ -233,8 +248,7 @@ export function updateAITank(game, tank, dt, trySpawnShot, computeDistances) {
             const center = cellCenter(game, bestNeighbor.cellX, bestNeighbor.cellY);
             steerToward(tank, center.x, center.y, dt);
         } else {
-            const center = cellCenter(game, powerUp.cellX, powerUp.cellY);
-            steerToward(tank, center.x, center.y, dt);
+            stopMoving(tank);
         }
         return;
     }

@@ -8,6 +8,7 @@
     "./Random.js": "./Random.js",
     "./MazeGeometry.js": "./MazeGeometry.js",
     "./PresetSprites.js": "./PresetSprites.js",
-    "./Theme.js": "./Theme.js"
+    "./Theme.js": "./Theme.js",
+    "./Limits.js": "./Limits.js"
   }
 }

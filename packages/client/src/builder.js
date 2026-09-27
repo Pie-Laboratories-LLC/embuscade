@@ -1,5 +1,14 @@
 // --- Écran: créer une partie ---
 
+import { GAME_NAME_MAX_BYTES, PASSWORD_MAX_BYTES, truncateToBytes } from '@bolo/shared/Limits.js';
+
+function enforceByteLimit(input, maxBytes) {
+    input.addEventListener('input', () => {
+        const truncated = truncateToBytes(input.value, maxBytes);
+        if (truncated !== input.value) input.value = truncated;
+    });
+}
+
 export class Builder {
     static get EULERS_CONSTANT() {
         return 6.25;
@@ -98,6 +107,9 @@ export class Builder {
     }
 
     _doListeners() {
+        enforceByteLimit(this._gameNameInput, GAME_NAME_MAX_BYTES);
+        enforceByteLimit(this._gamePasswordInput, PASSWORD_MAX_BYTES);
+
         this._gameNameInput.addEventListener('input', () => { this._updateCreateButtonState() });
 
         this._humanCountInput.addEventListener('input', () => {

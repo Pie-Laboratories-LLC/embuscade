@@ -2,6 +2,7 @@ import { WebSocketServer } from 'ws';
 import Wilson from '@bolo/shared/Wilson.js';
 import { Direction } from '@bolo/shared/Direction.js';
 import { getVerticalIcons } from '@bolo/shared/MazeGeometry.js';
+import { CHAT_MAX_BYTES, GAME_NAME_MAX_BYTES, PASSWORD_MAX_BYTES, PLAYER_NAME_MAX_BYTES, byteLength, truncateToBytes } from '@bolo/shared/Limits.js';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -26,7 +27,6 @@ const AFK_TIMEOUT_MS = 15000;
 const RAM_DAMAGE_SCALE = 100 / (2 * MAX_SPEED);
 const MAX_TOTAL_PLAYERS = 16;
 const RECONNECT_GRACE_MS = 60000;
-const CHAT_MAX_BYTES = 256;
 const CHAT_RATE_LIMIT_MS = 1000;
 const RESPAWN_DELAY_MS = 3500;
 const DEFAULT_SCORE_TARGET = 10;
@@ -194,6 +194,8 @@ function collidesWithWall(game, x, y, z) {
 }
 
 export function isAfk(tank, requireIdleCheck = true) {
+    // AFK is a human concept; an AI's lastActivityTime can go stale without meaning anything, and AFK tanks are immune to damage below.
+    if (tank.isAI) return false;
     if (tank.disconnected || tank.tabHidden) return true;
     if (!requireIdleCheck) return false;
     return Date.now() - tank.lastActivityTime > AFK_TIMEOUT_MS;
@@ -241,9 +243,11 @@ function trySpawnPowerUp(game) {
     });
 }
 
-// v1: seulement health et healthBoost -- les dix autres types viendront
-// s'ajouter à cette liste au fur et à mesure de leur implémentation
-const POWERUP_TYPES = ['health', 'healthBoost'];
+// v1: health, healthBoost, ramHorns -- les autres types viendront s'ajouter
+// à cette liste au fur et à mesure de leur implémentation
+const POWERUP_TYPES = ['health', 'healthBoost', 'ramHorns'];
+const RAM_HORNS_CAPACITY = 75;
+const RAM_HORNS_DAMAGE_MULTIPLIER = 1.5;
 
 function applyPowerUpEffect(tank, type) {
     if (type === 'health') {
@@ -251,6 +255,10 @@ function applyPowerUpEffect(tank, type) {
     } else if (type === 'healthBoost') {
         tank.maxHealth = Math.min(200, tank.maxHealth + 100);
         tank.health = Math.min(tank.maxHealth, tank.health + 100);
+    } else if (type === 'ramHorns') {
+        // Capacity tracked and rendered starting now; nothing consumes it
+        // yet -- collision damage doesn't check it until that pass lands.
+        tank.ramHorns = RAM_HORNS_CAPACITY;
     }
 }
 
@@ -272,6 +280,7 @@ function checkPowerUpPickups(game) {
 
         const powerUp = game.powerUps[hitIndex];
         applyPowerUpEffect(tank, powerUp.type);
+        emitSfx(game, 'gobblePowerUp', tank.x, tank.y, tank.z);
         game.powerUps.splice(hitIndex, 1);
     }
 }
@@ -306,6 +315,18 @@ function checkVerticalTransition(game, tank) {
             return;
         }
     }
+}
+
+// Collision-style damage (wall or tank ram) is absorbed by an equipped
+// ram's horns capacity first; only the remainder, if any, touches health.
+// Shot damage is unaffected -- horns are specifically a ramming shield.
+function applyCollisionDamage(tank, amount) {
+    if (tank.ramHorns > 0) {
+        const absorbed = Math.min(tank.ramHorns, amount);
+        tank.ramHorns -= absorbed;
+        amount -= absorbed;
+    }
+    if (amount > 0) tank.health = Math.max(0, tank.health - amount);
 }
 
 function updateTank(game, tank, dt) {
@@ -347,7 +368,7 @@ function updateTank(game, tank, dt) {
     tank.prevY = tank.y;
 
     if (collidesWithWall(game, proposedX, proposedY, tank.z)) {
-        tank.health = Math.max(0, tank.health - tank.speed * 0.3);
+        applyCollisionDamage(tank, tank.speed * 0.3);
         emitSfx(game, 'wall', tank.x, tank.y, tank.z);
         tank.speed = 0;
     } else {
@@ -396,16 +417,21 @@ function resolveTankCollisions(game) {
             const relVx = vAx - vBx;
             const relVy = vAy - vBy;
             const closingSpeed = Math.max(0, relVx * normalX + relVy * normalY);
-            const damage = closingSpeed * RAM_DAMAGE_SCALE;
+            const baseDamage = closingSpeed * RAM_DAMAGE_SCALE;
+            // Horns amplify what THIS tank deals when ramming, not what it
+            // takes -- that's what the absorption in applyCollisionDamage
+            // is for. So b's horns amplify a's incoming damage, and vice versa.
+            const damageToA = baseDamage * (b.ramHorns > 0 ? RAM_HORNS_DAMAGE_MULTIPLIER : 1);
+            const damageToB = baseDamage * (a.ramHorns > 0 ? RAM_HORNS_DAMAGE_MULTIPLIER : 1);
 
             emitSfx(game, 'collision', a.x, a.y, a.z);
 
             if (!isAfk(a,game.started)) {
-                a.health = Math.max(0, a.health - damage);
+                applyCollisionDamage(a, damageToA);
                 if (a.health === 0) a.killedByCandidate = b.playerId;
             }
             if (!isAfk(b,game.started)) {
-                b.health = Math.max(0, b.health - damage);
+                applyCollisionDamage(b, damageToB);
                 if (b.health === 0) b.killedByCandidate = a.playerId;
             }
             a.x = a.prevX;
@@ -518,6 +544,7 @@ function broadcastGameState(game) {
                     speed: t.speed,
                     dead: t.dead,
                     score: t.score,
+                    ramHorns: t.ramHorns,
                     afk: isAfk(t, game.started),
                     transitioning: t.transitioning,
                     transitionFromZ: t.transitionFromZ,
@@ -582,6 +609,7 @@ function broadcastRosterUpdate(game) {
 function startGame(game) {
     game.started = true;
     game.startedAt = Date.now();
+    broadcastGameStart(game);
 
     const aiIdentities = assignAIIdentities(game.aiSlots);
     for (const identity of aiIdentities) {
@@ -602,7 +630,7 @@ function startGame(game) {
             transitionStartTime: null, verticalCooldown: null,
             lastActivityTime: Date.now(), tabHidden: false, disconnected: false,
             disconnectTimeout: null, hostGraceTimeout: null, wasHostAtDisconnect: false,
-            lastFireTime: null,
+            lastFireTime: null, ramHorns: 0,
             aiState: 'wander', aiWaypoints: [],
             input: { turnLeft: false, turnRight: false, throttleUp: false, throttleDown: false }
         };
@@ -717,6 +745,7 @@ function resetGameForLobby(game) {
         tank.verticalCooldown = null;
         tank.lastFireTime = null;
         tank.awaitingLeave = false;
+        tank.ramHorns = 0;
         tank.input = { turnLeft: false, turnRight: false, throttleUp: false, throttleDown: false };
     }
 }
@@ -740,12 +769,16 @@ function getNeighbors(game, z, y, x) {
     const cell = game.maze[z][y][x];
     const neighbors = [];
 
-    if (cell & Direction.North) neighbors.push([z, y - 1, x]);
-    if (cell & Direction.South) neighbors.push([z, y + 1, x]);
-    if (cell & Direction.East) neighbors.push([z, y, x + 1]);
-    if (cell & Direction.West) neighbors.push([z, y, x - 1]);
-    if (cell & Direction.Up) neighbors.push([z - 1, y, x]);
-    if (cell & Direction.Down) neighbors.push([z + 1, y, x]);
+    // Bounds-check every direction: a boundary cell's open-wall bits should
+    // never point off the edge of the maze, but a crash here takes down the
+    // whole server (every game, every player) rather than just this one BFS
+    // step, so this doesn't trust that invariant.
+    if (cell & Direction.North && y - 1 >= 0) neighbors.push([z, y - 1, x]);
+    if (cell & Direction.South && y + 1 < game.length) neighbors.push([z, y + 1, x]);
+    if (cell & Direction.East && x + 1 < game.width) neighbors.push([z, y, x + 1]);
+    if (cell & Direction.West && x - 1 >= 0) neighbors.push([z, y, x - 1]);
+    if (cell & Direction.Up && z - 1 >= 0) neighbors.push([z - 1, y, x]);
+    if (cell & Direction.Down && z + 1 < game.height) neighbors.push([z + 1, y, x]);
 
     return neighbors;
 }
@@ -865,12 +898,30 @@ function checkDeaths(game) {
         newlyDead.push(tank);
     }
 
+    // Snapshot who each newly-dead tank was killed by before the fields get
+    // cleared below -- a mutual kill needs both sides' attribution intact
+    // regardless of which one this loop reaches first.
+    const killerOf = new Map(newlyDead.map((t) => [t.playerId, t.killedBy ?? t.killedByCandidate ?? null]));
+    const handled = new Set();
+
     for (const tank of newlyDead) {
-        const killerId = tank.killedBy ?? tank.killedByCandidate ?? null;
         tank.killedBy = null;
         tank.killedByCandidate = null;
 
+        if (handled.has(tank.playerId)) continue;
+
+        const killerId = killerOf.get(tank.playerId);
         if (killerId === null) continue;
+
+        if (killerOf.get(killerId) === tank.playerId) {
+            const other = newlyDead.find((t) => t.playerId === killerId);
+            if (other) {
+                handled.add(tank.playerId);
+                handled.add(other.playerId);
+                broadcastMurderSuicide(game, tank, other);
+                continue;
+            }
+        }
 
         const killer = game.tanks.get(killerId);
         if (killer && !killer.dead && killer.playerId !== tank.playerId) {
@@ -911,6 +962,7 @@ function respawnDeadTanks(game) {
         tank.transitionStartTime = null;
         tank.verticalCooldown = null;
         tank.lastActivityTime = now;
+        tank.ramHorns = 0;
         if (tank.isAI) {
             tank.aiState = 'wander';
             tank.aiWaypoints = [];
@@ -1000,10 +1052,6 @@ function tick() {
     }
 }
 
-function byteLength(str) {
-    return new TextEncoder().encode(str).length;
-}
-
 function broadcastBrowseChat(identity, text) {
     const message = JSON.stringify({
         type: 'chat-message',
@@ -1054,6 +1102,32 @@ function broadcastKillAnnouncement(game, killer, victim) {
     }
 }
 
+function broadcastMurderSuicide(game, a, b) {
+    const message = JSON.stringify({
+        type: 'chat-message',
+        kind: 'murder-suicide',
+        a: tankIdentity(a),
+        b: tankIdentity(b),
+        timestamp: Date.now()
+    });
+
+    for (const t of game.tanks.values()) {
+        if (t.ws && t.ws.readyState === t.ws.OPEN) t.ws.send(message);
+    }
+}
+
+function broadcastGameStart(game) {
+    const message = JSON.stringify({
+        type: 'chat-message',
+        kind: 'game-start',
+        timestamp: Date.now()
+    });
+
+    for (const t of game.tanks.values()) {
+        if (t.ws && t.ws.readyState === t.ws.OPEN) t.ws.send(message);
+    }
+}
+
 const wss = new WebSocketServer({ port: PORT });
 
 wss.on('connection', (ws) => {
@@ -1081,7 +1155,7 @@ wss.on('connection', (ws) => {
 
         if (msg.type === 'browse') {
             browserIdentities.set(ws, {
-                name: String(msg.playerName ?? 'Player').slice(0, 20),
+                name: truncateToBytes(String(msg.playerName ?? 'Player'), PLAYER_NAME_MAX_BYTES),
                 primaryColor: msg.primaryColor,
                 secondaryColor: msg.secondaryColor,
                 sprite: msg.sprite
@@ -1161,8 +1235,8 @@ wss.on('connection', (ws) => {
             const timeLimitMs = msg.timeLimitMs ? Math.max(2, Math.min(60, parseInt(msg.timeLimitMs, 10))) * 60000 : null;
 
             const game = createGame({
-                name: String(msg.name ?? 'Untitled Game').slice(0, 120),
-                password: msg.password ? hashPassword(msg.password) : null,
+                name: truncateToBytes(String(msg.name ?? 'Untitled Game'), GAME_NAME_MAX_BYTES),
+                password: msg.password ? hashPassword(truncateToBytes(msg.password, PASSWORD_MAX_BYTES)) : null,
                 width, length, height,
                 humanCount, aiCount,
                 scoreTarget, timeLimitMs
@@ -1177,7 +1251,7 @@ wss.on('connection', (ws) => {
                 playerId,
                 ws,
                 sessionToken: msg.sessionToken,
-                name: String(msg.playerName ?? 'Player').slice(0, 20),
+                name: truncateToBytes(String(msg.playerName ?? 'Player'), PLAYER_NAME_MAX_BYTES),
                 primaryColor: msg.primaryColor,
                 secondaryColor: msg.secondaryColor,
                 sprite: msg.sprite,
@@ -1188,7 +1262,7 @@ wss.on('connection', (ws) => {
                 transitionStartTime: null, verticalCooldown: null,
                 lastActivityTime: Date.now(), tabHidden: false, disconnected: false,
                 disconnectTimeout: null, hostGraceTimeout: null, wasHostAtDisconnect: false,
-                lastFireTime: null,
+                lastFireTime: null, ramHorns: 0,
                 score: 0,
                 lastScoreTime: null,
                 input: { turnLeft: false, turnRight: false, throttleUp: false, throttleDown: false }
@@ -1219,12 +1293,13 @@ wss.on('connection', (ws) => {
             const timeLimitMs = msg.timeLimitMs ? Math.max(2, Math.min(60, parseInt(msg.timeLimitMs, 10))) * 60000 : null;
 
             if(msg.gameId === undefined) throw 'msg.gameId is undefined!';
+            if(msg.hostPlayerId === undefined) throw 'msg.hostPlayerId is undefined!';
 
             // delete / recreate the game
             games.delete(msg.gameId);
             const game = createGame({
-                name: String(msg.name ?? 'Untitled Game').slice(0, 120),
-                password: msg.password ? hashPassword(msg.password) : null,
+                name: truncateToBytes(String(msg.name ?? 'Untitled Game'), GAME_NAME_MAX_BYTES),
+                password: msg.password ? hashPassword(truncateToBytes(msg.password, PASSWORD_MAX_BYTES)) : null,
                 width, length, height,
                 humanCount, aiCount,
                 scoreTarget, timeLimitMs
@@ -1239,7 +1314,7 @@ wss.on('connection', (ws) => {
                 playerId,
                 ws,
                 sessionToken: msg.sessionToken,
-                name: String(msg.playerName ?? 'Player').slice(0, 20),
+                name: truncateToBytes(String(msg.playerName ?? 'Player'), PLAYER_NAME_MAX_BYTES),
                 primaryColor: msg.primaryColor,
                 secondaryColor: msg.secondaryColor,
                 sprite: msg.sprite,
@@ -1250,7 +1325,7 @@ wss.on('connection', (ws) => {
                 transitionStartTime: null, verticalCooldown: null,
                 lastActivityTime: Date.now(), tabHidden: false, disconnected: false,
                 disconnectTimeout: null, hostGraceTimeout: null, wasHostAtDisconnect: false,
-                lastFireTime: null,
+                lastFireTime: null, ramHorns: 0,
                 score: 0,
                 lastScoreTime: null,
                 input: { turnLeft: false, turnRight: false, throttleUp: false, throttleDown: false }
@@ -1277,7 +1352,7 @@ wss.on('connection', (ws) => {
                 ws.send(JSON.stringify({ type: 'join-rejected', reason: 'started' }));
                 return;
             }
-            if (game.password && game.password !== hashPassword(msg.password || '')) {
+            if (game.password && game.password !== hashPassword(truncateToBytes(msg.password || '', PASSWORD_MAX_BYTES))) {
                 ws.send(JSON.stringify({ type: 'join-rejected', reason: 'bad-password' }));
                 return;
             }
@@ -1294,7 +1369,7 @@ wss.on('connection', (ws) => {
                 playerId,
                 ws,
                 sessionToken: msg.sessionToken,
-                name: String(msg.playerName ?? 'Player').slice(0, 20),
+                name: truncateToBytes(String(msg.playerName ?? 'Player'), PLAYER_NAME_MAX_BYTES),
                 primaryColor: msg.primaryColor,
                 secondaryColor: msg.secondaryColor,
                 sprite: msg.sprite,
@@ -1305,7 +1380,7 @@ wss.on('connection', (ws) => {
                 transitionStartTime: null, verticalCooldown: null,
                 lastActivityTime: Date.now(), tabHidden: false, disconnected: false,
                 disconnectTimeout: null, hostGraceTimeout: null, wasHostAtDisconnect: false,
-                lastFireTime: null,
+                lastFireTime: null, ramHorns: 0,
                 score: 0,
                 lastScoreTime: null,
                 input: { turnLeft: false, turnRight: false, throttleUp: false, throttleDown: false }
@@ -1437,6 +1512,11 @@ wss.on('connection', (ws) => {
         const playerId = assignedPlayerId;
         const tank = game.tanks.get(playerId);
         if (!tank) return;
+        // A newer connection may have already resumed this tank (e.g. a
+        // quick unmount/remount of an embedded client) -- if so, its ws
+        // reference is no longer this socket, and tearing it down here
+        // would clobber the live connection instead of the dead one.
+        if (tank.ws !== ws) return;
 
         tank.disconnected = true;
         tank.ws = null;

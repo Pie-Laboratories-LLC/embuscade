@@ -19,6 +19,7 @@ WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=deps --chown=node:node /app/node_modules ./node_modules
 COPY --chown=node:node package.json ./package.json
+COPY --chown=node:node AI-taunts.json ./AI-taunts.json
 COPY --chown=node:node packages/shared packages/shared
 COPY --chown=node:node packages/server/package.json packages/server/package.json
 COPY --chown=node:node packages/server/src packages/server/src

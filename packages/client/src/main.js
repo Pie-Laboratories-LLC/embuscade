@@ -2,7 +2,8 @@ import { Direction } from '@bolo/shared/Direction.js';
 import { getVerticalIcons } from '@bolo/shared/MazeGeometry.js';
 import { PRESET_SPRITES, TRANSPARENT } from '@bolo/shared/PresetSprites.js';
 import { DEFAULT_THEME } from '@bolo/shared/Theme.js';
-import { initAudio, resumeAudioContext, playPositional } from './AudioManager.js';
+import { CHAT_MAX_BYTES, PLAYER_NAME_MAX_BYTES, truncateToBytes } from '@bolo/shared/Limits.js';
+import { initAudio, resumeAudioContext, playPositional, playSound } from './AudioManager.js';
 import { loadFonts, STENCIL_FONT_FAMILY } from './fonts.js';
 import { showSplashScreen, hideSplashScreen } from './splash.js';
 import { showHelpModal, hideHelpModal } from './help.js';
@@ -12,6 +13,7 @@ import './embuscade.css';
 
 const TANK_RADIUS = 14;
 const SPRITE_SIZE = 32;
+const RAM_HORNS_CAPACITY = 75;
 const VIEWPORT_WIDTH = 640;
 const VIEWPORT_HEIGHT = 480;
 const FOG_RADIUS = 256;
@@ -38,7 +40,7 @@ const MARKUP = `
       <div id="emb-join-dialog" style="display: none;">
         <h2>Join Embuscade</h2>
         <label for="emb-player-name">Name</label>
-        <input type="text" id="emb-player-name" maxlength="20" />
+        <input type="text" id="emb-player-name" maxlength="32" />
 
         <label for="emb-primary-color">Primary colour</label>
         <input type="color" id="emb-primary-color" />
@@ -78,10 +80,10 @@ const MARKUP = `
       <div id="emb-builder-dialog" style="display: none;">
         <h2 id="emb-builder-title">Create Game</h2>
         <label for="emb-game-name">Game name</label>
-        <input type="text" id="emb-game-name" maxlength="120" placeholder="My Embuscade Game" />
+        <input type="text" id="emb-game-name" maxlength="64" placeholder="My Embuscade Game" />
 
         <label for="emb-game-password">Password (optional)</label>
-        <input type="text" id="emb-game-password" placeholder="Leave blank for no password" />
+        <input type="text" id="emb-game-password" maxlength="64" placeholder="Leave blank for no password" />
 
         <label for="emb-human-count">Human players: <span id="emb-human-count-value">2</span></label>
         <div class="slider-row"><input type="range" id="emb-human-count" min="1" max="16" value="2" /></div>
@@ -177,12 +179,18 @@ const MARKUP = `
           <canvas id="emb-game-end-sprite" width="32" height="32"></canvas>
           <h2 id="emb-game-end-title"></h2>
         </div>
-        <div class="chat-main" style="height: 300px;">
-          <div id="emb-end-chat-messages" class="chat-messages"></div>
-          <div class="chat-input-row">
-            <button id="emb-end-who-button">Who</button>
-            <input type="text" id="emb-end-chat-input" placeholder="/ Say something" />
-            <button id="emb-end-chat-send-button">Chat</button>
+        <div id="emb-game-end-body">
+          <div class="chat-main" id="emb-game-end-chat-panel">
+            <div id="emb-end-chat-messages" class="chat-messages"></div>
+            <div class="chat-input-row">
+              <button id="emb-end-who-button">Who</button>
+              <input type="text" id="emb-end-chat-input" placeholder="/ Say something" />
+              <button id="emb-end-chat-send-button">Chat</button>
+            </div>
+          </div>
+          <div id="emb-game-end-right-rail">
+            <h3>Final Scores</h3>
+            <ol id="emb-end-scoreboard"></ol>
           </div>
         </div>
         <button id="emb-game-end-leave-button">Leave</button>
@@ -274,6 +282,13 @@ export function mount(container, { wsUrl }) {
     function listen(target, type, handler) {
         target.addEventListener(type, handler);
         globalListeners.push([target, type, handler]);
+    }
+
+    function enforceByteLimit(input, maxBytes) {
+        listen(input, 'input', () => {
+            const truncated = truncateToBytes(input.value, maxBytes);
+            if (truncated !== input.value) input.value = truncated;
+        });
     }
 
     function unmount() {
@@ -414,6 +429,37 @@ export function mount(container, { wsUrl }) {
                 victimNameSpan.className = 'chat-name';
                 victimNameSpan.textContent = entry.victim.name;
                 row.appendChild(victimNameSpan);
+            } else if (entry.kind === 'murder-suicide') {
+                row.classList.add('chat-message-kill');
+                row.appendChild(makeChatSpriteCanvas(entry.a));
+
+                const aNameSpan = document.createElement('span');
+                aNameSpan.className = 'chat-name';
+                aNameSpan.textContent = entry.a.name;
+                row.appendChild(aNameSpan);
+
+                const andSpan = document.createElement('span');
+                andSpan.className = 'chat-text';
+                andSpan.textContent = 'and';
+                row.appendChild(andSpan);
+
+                row.appendChild(makeChatSpriteCanvas(entry.b));
+
+                const bNameSpan = document.createElement('span');
+                bNameSpan.className = 'chat-name';
+                bNameSpan.textContent = entry.b.name;
+                row.appendChild(bNameSpan);
+
+                const suicideSpan = document.createElement('span');
+                suicideSpan.className = 'chat-text';
+                suicideSpan.textContent = 'just murder-suicided';
+                row.appendChild(suicideSpan);
+            } else if (entry.kind === 'game-start') {
+                row.classList.add('chat-message-game-start');
+
+                const bannerSpan = document.createElement('span');
+                bannerSpan.textContent = '******** GAME ON ********';
+                row.appendChild(bannerSpan);
             } else {
                 row.appendChild(makeChatSpriteCanvas(entry));
 
@@ -508,6 +554,7 @@ export function mount(container, { wsUrl }) {
     const voiceChatIconEl = $('voice-chat-icon');
 
     const nameInput = $('player-name');
+    enforceByteLimit(nameInput, PLAYER_NAME_MAX_BYTES);
     const primaryColorInput = $('primary-color');
     const secondaryColorInput = $('secondary-color');
     const presetListEl = $('preset-list');
@@ -520,6 +567,7 @@ export function mount(container, { wsUrl }) {
     const browserLeaveButton = $('browser-leave-button');
     const browserChatMessagesEl = $('browser-chat-messages');
     const browserChatInput = $('browser-chat-input');
+    enforceByteLimit(browserChatInput, CHAT_MAX_BYTES);
     const browserChatSendButton = $('browser-chat-send-button');
     const browserWhoButton = $('browser-who-button');
 
@@ -532,11 +580,13 @@ export function mount(container, { wsUrl }) {
     const lobbyWaitingMessageEl = $('lobby-waiting-message');
     const lobbyChatMessagesEl = $('lobby-chat-messages');
     const lobbyChatInput = $('lobby-chat-input');
+    enforceByteLimit(lobbyChatInput, CHAT_MAX_BYTES);
     const lobbyChatSendButton = $('lobby-chat-send-button');
 
     const gameLeaveButton = $('game-leave-button');
     const gameChatMessagesEl = $('game-chat-messages');
     const gameChatInput = $('game-chat-input');
+    enforceByteLimit(gameChatInput, CHAT_MAX_BYTES);
     const gameChatSendButton = $('game-chat-send-button');
 
     const gameChatPanelEl = $('game-chat-panel');
@@ -548,9 +598,11 @@ export function mount(container, { wsUrl }) {
     const gameEndTitle = $('game-end-title');
     const endChatMessagesEl = $('end-chat-messages');
     const endChatInput = $('end-chat-input');
+    enforceByteLimit(endChatInput, CHAT_MAX_BYTES);
     const endChatSendButton = $('end-chat-send-button');
     const endWhoButton = $('end-who-button');
     const gameEndLeaveButton = $('game-end-leave-button');
+    const endScoreboardEl = $('end-scoreboard');
 
     const scoreboardEl = $('scoreboard');
     const inGameSummaryEl = $('in-game-summary')
@@ -571,7 +623,6 @@ export function mount(container, { wsUrl }) {
     function showScreen(screen,...parameters) {
         if(screenStack.length && screenStack.includes(screen)) {
             let index = screenStack.indexOf(screen);
-            console.log(`Showing screen ${screen}; it's on the stack at ${index}: ${screenStack}`);
             while(screenStack.length - 1 > index) {
                 screenStack.pop();
             }
@@ -613,20 +664,22 @@ export function mount(container, { wsUrl }) {
     }
 
     let gameId = undefined;
-    let hostPlayerId = undefined;
 
     const builderEventSink = {
         createGame: function(createGame,parameters) {
             if(createGame) parameters.type = 'create-game';
             else {
+                // Edit Game is only ever shown to (and clickable by) the
+                // current player when they're the host, so "my own
+                // playerId" IS the host id here -- lobby-state never
+                // actually sends a top-level hostPlayerId to track instead.
                 parameters.type = 'edit-game';
-                parameters.hostPlayerId = hostPlayerId;
+                parameters.hostPlayerId = playerId;
                 parameters.gameId = gameId;
             }
             ws.send(JSON.stringify(parameters));
         },
         cancelGame: function() {
-            console.log(`er screenStack = ${screenStack}`);
             popScreen();
         }
     }
@@ -845,7 +898,6 @@ export function mount(container, { wsUrl }) {
             var m = Math.floor(s / 60);
             s -= m * 60;
             timeRemainingEl.textContent = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
-            console.log(`${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(ms).padStart(3, '0')}`);
         }
         else {
             timeRemainingEl.textContent = '♾️';
@@ -936,6 +988,7 @@ export function mount(container, { wsUrl }) {
                 tanks = [];
                 shots = [];
                 maze = null;
+                identities.clear();
                 clearChat();
                 // a resume can land straight in Lobby/Game with no Splash below it, so patching via showScreen() isn't enough -- reset outright.
                 screenStack.length = 0;
@@ -957,6 +1010,8 @@ export function mount(container, { wsUrl }) {
             } else if (msg.type === 'lobby-joined') {
                 playerId = msg.playerId;
                 voiceChat.setSelfId(playerId);
+                // each game's playerIds start at 1 again, so a stale cached identity could otherwise leak onto whoever holds that id in this new game.
+                identities.clear();
                 registerIdentity({ playerId, ...playerProfile });
                 clearChat();
 
@@ -975,8 +1030,10 @@ export function mount(container, { wsUrl }) {
                 tanks = [];
                 shots = [];
                 maze = null;
+                identities.clear();
                 clearChat();
-                popScreen();
+                // Not popScreen(): from an active game that'd reveal a stale Lobby for a game now gone or continuing without us.
+                showScreen(Screen.Browser);
             } else if (msg.type === 'reverted-to-lobby') {
                 tanks = [];
                 shots = [];
@@ -995,6 +1052,7 @@ export function mount(container, { wsUrl }) {
                     if (!identities.has(entry.playerId)) registerIdentity(entry);
                 }
                 updateVoicePeers(msg.roster);
+                playSound('readyFight');
 
                 showScreen(Screen.Game);
                 updateInGameSummary(msg);
@@ -1021,6 +1079,7 @@ export function mount(container, { wsUrl }) {
                 const winnerCanvas = renderSpriteToCanvas(msg.winner.sprite, msg.winner.primaryColor, msg.winner.secondaryColor);
                 gameEndSprite.getContext('2d').drawImage(winnerCanvas, 0, 0);
                 gameEndTitle.textContent = `${msg.winner.name} Wins!`;
+                renderEndScoreboard();
                 replaceScreen(Screen.EndGame);
                 renderAllChatPanels();
             } else if (msg.type === 'left-game') {
@@ -1146,7 +1205,6 @@ export function mount(container, { wsUrl }) {
     function renderLobby(msg) {
         // TODO il faut avoir le concept "currentGame"
         gameId = msg.gameId;
-        hostPlayerId = msg.hostPlayerId;
         lobbyGameNameEl.textContent = msg.name;
         if (msg.hasPassword) {
             lobbyGameNameEl.textContent += ' 🔒';
@@ -1219,6 +1277,11 @@ export function mount(container, { wsUrl }) {
     }
 
     gameLeaveButton.addEventListener('click', () => {
+        const humanCount = tanks.filter((t) => !identities.get(t.playerId)?.isAI).length;
+        const message = humanCount <= 1
+            ? 'Are you sure you want to abandon the game?'
+            : "You won't be able to rejoin until the current game is complete.";
+        if (!confirm(message)) return;
         ws.send(JSON.stringify({ type: 'leave-game' }));
     });
 
@@ -1469,6 +1532,42 @@ export function mount(container, { wsUrl }) {
         healthBoost: '💗'
     };
 
+    // Drawn procedurally (not a sprite/emoji) so the same shape can show
+    // remaining absorption capacity: fraction (0..1) scales both horn
+    // length and opacity. Draws along local +X "forward" in whatever
+    // transform the caller has already set up (translate/rotate first).
+    function drawRamHornsIcon(scale, fraction) {
+        ctx.save();
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = `rgba(224, 202, 168, ${0.35 + 0.65 * fraction})`;
+        ctx.lineWidth = Math.max(1.5, scale * 0.08);
+
+        // Polar sweep, not a single quadratic bow: angle runs from
+        // forward-and-out past the side and on toward the rear as the
+        // radius grows, so the tip actually curls back over -- a ram's
+        // curl, not a straight antelope-horn sweep.
+        const steps = 16;
+        const startAngle = -Math.PI * 0.1;
+        const endAngle = Math.PI * 0.85;
+        const baseOffsetX = scale * 0.1;
+        const minRadius = scale * 0.08;
+        const maxRadius = scale * 0.5;
+
+        for (const side of [-1, 1]) {
+            ctx.beginPath();
+            for (let i = 0; i <= steps; i++) {
+                const t = (i / steps) * fraction;
+                const angle = startAngle + t * (endAngle - startAngle);
+                const radius = minRadius + (maxRadius - minRadius) * t;
+                const x = baseOffsetX + radius * Math.cos(angle);
+                const y = side * radius * Math.sin(angle);
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+        }
+        ctx.restore();
+    }
 
     function drawPowerUps(camX, camY, localZ) {
         ctx.font = 'bold 24px sans-serif';
@@ -1481,7 +1580,16 @@ export function mount(container, { wsUrl }) {
             const centerY = p.cellY * mazeConfig.cellSize + mazeConfig.cellSize / 2;
             const screenX = centerX - camX + VIEWPORT_WIDTH / 2;
             const screenY = centerY - camY + VIEWPORT_HEIGHT / 2;
-            ctx.fillText(POWERUP_ICONS[p.type] ?? '?', screenX, screenY);
+
+            if (p.type === 'ramHorns') {
+                ctx.save();
+                ctx.translate(screenX, screenY);
+                ctx.rotate(-Math.PI / 2);
+                drawRamHornsIcon(SPRITE_SIZE, 1);
+                ctx.restore();
+            } else {
+                ctx.fillText(POWERUP_ICONS[p.type] ?? '?', screenX, screenY);
+            }
         }
     }
 
@@ -1528,6 +1636,10 @@ export function mount(container, { wsUrl }) {
             ctx.beginPath();
             ctx.arc(0, 0, TANK_RADIUS, 0, Math.PI * 2);
             ctx.fill();
+        }
+
+        if (tank.ramHorns > 0) {
+            drawRamHornsIcon(SPRITE_SIZE, tank.ramHorns / RAM_HORNS_CAPACITY);
         }
 
         drawHealthBar(tank);
@@ -1657,6 +1769,33 @@ export function mount(container, { wsUrl }) {
             }
             li.appendChild(scoreSpan);
             scoreboardEl.appendChild(li);
+        }
+    }
+
+    function renderEndScoreboard() {
+        const sorted = [...endGamePlayersList].sort((a, b) => b.score - a.score);
+        endScoreboardEl.innerHTML = '';
+        for (const entry of sorted) {
+            const li = document.createElement('li');
+
+            const spriteCanvas = document.createElement('canvas');
+            spriteCanvas.width = SPRITE_SIZE;
+            spriteCanvas.height = SPRITE_SIZE;
+            spriteCanvas.className = 'roster-sprite';
+            const rendered = renderSpriteToCanvas(entry.sprite, entry.primaryColor, entry.secondaryColor);
+            spriteCanvas.getContext('2d').drawImage(rendered, 0, 0);
+
+            const nameSpan = document.createElement('span');
+            nameSpan.textContent = entry.name;
+
+            const scoreSpan = document.createElement('span');
+            scoreSpan.className = 'score-value';
+            scoreSpan.textContent = entry.score;
+
+            li.appendChild(spriteCanvas);
+            li.appendChild(nameSpan);
+            li.appendChild(scoreSpan);
+            endScoreboardEl.appendChild(li);
         }
     }
 

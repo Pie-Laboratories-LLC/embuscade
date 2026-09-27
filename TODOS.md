@@ -2,22 +2,22 @@ Good — here's the full list as it stands, reordered per tonight's adjustments:
 
 ** Embuscade TODO list**
 
-1. Text chat (all screens except Join Bolo)
-2. Respawn placement (≥6.25 cells from other players — Bob Euler's constant)
-3. Equidistant starting positions at game start
-5. AI players
-7. Sound effects
+1. ~~Text chat (all screens except Join Bolo)~~
+2. ~~Respawn placement (≥6.25 cells from other players — Bob Euler's constant)~~
+3. ~~Equidistant starting positions at game start~~
+5. ~~AI players~~
+7. ~~Sound effects~~
 6. Power-ups
 4. ~~Voice chat~~ — done: open-mic toggle (Right Ctrl, not push-to-talk), mesh WebRTC signaled over the existing WebSocket, available in Lobby/Game/EndGame/Builder-edit, muted state persists in localStorage across games. No TURN server, so voice may fail to connect across strict/symmetric NATs.
-5. Show scores in end game dialog right rail, make chat area larger.  remove ai players from who
+5. ~~Show scores in end game dialog right rail, make chat area larger. remove ai players from who~~ — done.
 8. Keybinding customization
 9. High-DPI canvas fix (`devicePixelRatio` scaling — currently blurry on retina/high-res displays)
 10. Sprite scale-up — reconsider `SPRITE_SIZE` and/or grid resolution (32×32 → 64×64) now that cells are 256px; look at it rendered first before deciding
-11. README
+11. ~~README~~
 12. Custom pixel-editor UI (the "Custom (soon)" stub in the tank picker)
 13. github actions builds for the client, server, and docker image.
 14. themes for games, jungle, desert, arctic, etc.
-15. proper splash screen
+15. ~~proper splash screen~~
 16. proper sprites for powerups
 
 powerups:
@@ -53,7 +53,8 @@ powerups:
 11. **Oil gun** — three charges. Each use drops an oil slick hazard on the map (presumably at the tank's current position, or just behind it — worth confirming placement once we design this pass). Three oil-can icons shown at the tank's front, depleting per use.
 12. **Oil slick** — placed hazard object, 4s lifetime before despawning. Any tank driving over it loses steering/throttle control: can't turn, accelerate, or decelerate, and coasts at whatever speed it had at the moment of contact for 1.5s.
 
-audio files key:
+audio files key.  NOTE - these are all from freesound.org.  NOTE ALSO - I have
+no aptitude for audio engineering.
 `151713__bowlingballout__pvc-rocket-cannon.wav`                        - missle
 `420673__sypherzent__basic-melee-hit.wav`                              - when tank is shot
 `812592__qubodup__clang.wav`                                           - when tanks collide
@@ -64,4 +65,5 @@ audio files key:
 `802577__qubodup__creaking-floorboards-05.wav`                         - slip on oil
 `589836__mrfossy__sfx_squelch_slayer_215.wav`                          - spray oil
 `67617__qubodup__metal-crash-collision.flac`                           - battering ram
+`406622__xemptful__ready-trimmed.wav`                                  - ready fight!
 

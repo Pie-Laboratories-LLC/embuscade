@@ -13,6 +13,8 @@ const SOUND_FILES = {
     wall: `${SOUND_BASE}sounds/743259__qubodup__short-rusty-metal-scrape.wav`,
     explosion: `${SOUND_BASE}sounds/609587__unfa__grenade-explosion-sfx-medium-sized-meaty-realistic.wav`,
     collision: `${SOUND_BASE}sounds/812592__qubodup__clang.wav`,
+    readyFight: `${SOUND_BASE}sounds/406622__xemptful__ready-trimmed.wav`,
+    gobblePowerUp: `${SOUND_BASE}sounds/258020__kodack__arcade-bleep-sound.wav`
     // power-up sounds slotteront ici plus tard: missile, doubleBarrel,
     // ram, sprayOil, slipOil -- même mécanisme, juste de nouvelles clés
 };
@@ -80,5 +82,19 @@ export function playPositional(soundKey, worldX, worldY, worldZ, listenerX, list
 
     source.connect(gainNode);
     gainNode.connect(audioContext.destination);
+    source.start(0);
+}
+
+// Non-positional: full volume for everyone regardless of tank position --
+// for cues like a round starting, not events happening at a world location.
+export function playSound(soundKey) {
+    if (!audioContext || audioContext.state !== 'running') return;
+
+    const buffer = buffers.get(soundKey);
+    if (!buffer) return;
+
+    const source = audioContext.createBufferSource();
+    source.buffer = buffer;
+    source.connect(audioContext.destination);
     source.start(0);
 }
